@@ -1,6 +1,8 @@
 # vuln-prioritize
 ``
-> **v0.1.0-alpha** — First public release. Expect rough edges; feedback and PRs welcome. 
+> **v0.1.0-alpha** — First public release. Expect rough edges; feedback and PRs welcome.
+>
+> 
 > **v0.1.0-alpha-todos** - Optimize API calls, re-work scoring algorithm formula and wait time estimate mechanism.
 
 A command-line tool that combines five public data sources into a single **0–100 priority score** per CVE, so you know which vulnerabilities to patch first.
