@@ -32,6 +32,8 @@ env/
 .exploitdb_data.csv
 .kev_cache.json
 .github_etag_cache.json
+.github_poc_cache.json
+.nvd_cache.json
 
 # ── Generated reports (output, not source) ─────────────────────────────────────
 vulnerability_report.json

@@ -1,9 +1,7 @@
 # vuln-prioritize
-``
-> **v0.1.0-alpha** — First public release. Expect rough edges; feedback and PRs welcome.
->
-> 
-> **v0.1.0-alpha-todos** - Optimize API calls, re-work scoring algorithm formula and wait time estimate mechanism.
+
+> **v0.1.1-alpha** — Bayesian scoring algorithm, API checker completeness, rate limiting optimizations.
+> ✅ **Completed**: Bayesian log-odds prioritization · All 5 API checks · EPSS batching · ETag caching · Exponential backoff
 
 A command-line tool that combines five public data sources into a single **0–100 priority score** per CVE, so you know which vulnerabilities to patch first.
 
@@ -25,7 +23,7 @@ Each CVE is scored by pulling live data from:
 | **GitHub PoCs** | GitHub API | Public proof-of-concept code exists |
 | **ExploitDB / MSF** | ExploitDB CSV + Metasploit Framework | Working exploit / Metasploit module exists |
 
-Scores are combined and multiplied by exploit availability, then capped at 100.
+Scores are combined using Bayesian evidence inference (log-odds → sigmoid), then multiplied by exploit availability factors, all normalized to 0–100.
 
 ---
 
@@ -74,28 +72,66 @@ python3 vuln-prioritize.py --setup        # configure API keys interactively
 
 ## Scoring Algorithm
 
+The priority score uses **Bayesian evidence combination** to fuse multiple vulnerability data sources into a single 0–100 confidence score.
+
+### Theoretical Foundation
+
+**Bayesian Log-Odds Combination** (Jeffreys' method)
+- Each data source is treated as independent evidence of vulnerability risk
+- Evidence is combined using log-odds ratios: `log_odds = Σ(weight_i × log(P_i / (1 - P_i)))`
+- Result is converted back to probability using logistic sigmoid: `P = 1 / (1 + e^(-log_odds))`
+
+**Weber-Fechner Law for CVSS**
+- Human perception of risk is logarithmic, not linear
+- CVSS is normalized as: `CVSS_prob = log(1 + CVSS) / log(11)` to reflect diminishing returns at higher severities
+
+**Source Reliability Weights**
+Each data source is weighted by epistemic confidence:
+- **EPSS (35%)** — Highest weight; statistically modeled exploitation probability
+- **CVSS (30%)** — Authoritative but not exploit-specific
+- **KEV (25%)** — Strong empirical evidence but lagging indicator
+- **Exploit proof (10%)** — Direct proof but rare in dataset
+
+### Scoring Formula
+
 ```
-Priority Score (0–100) = base_score × exploit_multiplier
+Priority Score = Bayesian_Posterior × Entropy_Discount × 100
 
-Base score (when EPSS available):
-  base_score = (CVSS × 4) + (EPSS × 40) + (20 if in KEV)
-
-Base score (when EPSS unavailable):
-  base_score = (CVSS × 6) + (20 if in KEV)
-
-Exploit multipliers (stack multiplicatively, capped at 1.75×):
-  GitHub PoC found            →  1.20×
-  ExploitDB/MSF module found  →  1.15× – 1.35× (based on reliability)
+Where:
+  Bayesian_Posterior = sigmoid(Σ weights × log_odds(evidence))
+  Entropy_Discount = 0.90 + (0.10 × data_completeness)  [penalizes missing data]
 ```
+
+### Evidence Interpretation
+
+| Score Range | Risk Level | Interpretation |
+|-------------|-----------|-----------------|
+| 85–100 | **Critical** | Known/active exploitation, PoC/exploit exists, high severity |
+| 70–84 | **High** | Probable exploitation, or high severity + partial evidence |
+| 50–69 | **Medium** | Exploitable but limited proof, or lower severity + evidence |
+| 30–49 | **Low** | Difficult to exploit or low severity, no active proof |
+| 0–29 | **Minimal** | Very low risk; low severity and no evidence of exploitation |
 
 ### Example
 
 ```
-CVE-2023-44487  CVSS 7.5 · EPSS N/A · KEV ✓ · GitHub PoC ✓
+CVE-2023-44487:
+  CVSS 7.5 (log-normalized: 0.78)
+  EPSS not available (estimated: 0.47)
+  KEV ✓ (active exploitation: 0.90)
+  GitHub PoC ✓ (exploit confidence: 0.88)
+  Exploit multiplier: 1.20
 
-  base  = (7.5 × 6) + 20 = 65
-  mult  = 1.20 (public PoC)
-  score = 65 × 1.20 = 78.0  →  Patch first
+  Bayesian combination:
+    log_odds = 0.30×log(0.78/0.22) + 0.35×log(0.47/0.53) + 0.25×log(0.90/0.10) + 0.10×log(0.88/0.12)
+            ≈ 0.30×1.25 + 0.35×(-0.13) + 0.25×2.20 + 0.10×1.98
+            ≈ 0.375 - 0.046 + 0.550 + 0.198
+            ≈ 1.077
+    
+    posterior = 1 / (1 + e^(-1.077)) ≈ 0.746  [74.6% confidence in high risk]
+    
+    entropy discount = 0.90 + (0.10 × 0.75) = 0.975  [data completeness 75%]
+    final_score = 0.746 × 0.975 × 100 ≈ 72.7  →  Patch early
 ```
 
 ---
@@ -124,15 +160,15 @@ Rank   CVE ID             Priority    CVSS   Severity   EPSS     KEV   PoC   Mul
 
 ## Rate Limits
 
-The tool enforces per-API rate limits automatically. When a limit is reached it displays an in-place countdown and resumes without data loss.
+The tool enforces per-API rate limits automatically. When a limit is reached it displays an in-place countdown and resumes without data loss. Local result caches (24h TTL) mean re-runs of recently analyzed CVEs cost **zero** API calls.
 
-| API | Unauthenticated | With key/token |
-|-----|----------------|----------------|
-| NVD (CVSS) | 5 req/min | 5 req/sec (×60) |
-| EPSS | 30 req/min (batch — 1 call for all CVEs) | — |
-| KEV | One request (cached with `If-Modified-Since`) | — |
-| GitHub Search | 10 req/min | 30 req/min |
-| ExploitDB CSV | One download (ETag-cached, free on re-runs) | — |
+| API | Unauthenticated | With key/token | Local cache |
+|-----|----------------|----------------|-------------|
+| NVD (CVSS) | 5 req/min | 5 req/sec (×60) | 24h per-CVE result cache |
+| EPSS | 30 req/min (batch — 1 call for all CVEs) | — | — |
+| KEV | One request (cached with `If-Modified-Since`) | — | Conditional cache |
+| GitHub Search | 10 req/min (1 query/CVE) | 30 req/min (1 query/CVE) | 24h per-CVE result cache + ETag |
+| ExploitDB CSV | One download (ETag-cached, free on re-runs) | — | ETag cache |
 
 ---
 

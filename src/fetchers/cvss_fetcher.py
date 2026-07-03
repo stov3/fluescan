@@ -7,6 +7,8 @@ import argparse
 import csv
 import json
 import sys
+import time
+from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from typing import List, Dict, Any
@@ -15,6 +17,29 @@ from config import get_config
 from rate_limiter import get_rate_limiter, update_rate_limit_from_response, handle_rate_limit_error
 
 NVD_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+
+# Local result cache — CVSS base scores rarely change once published.
+# Cached entries skip the API entirely (zero rate-limit cost on re-runs).
+NVD_CACHE_FILE = Path(".nvd_cache.json")
+NVD_CACHE_TTL = 24 * 3600  # 24 hours
+
+
+def _load_nvd_cache() -> dict:
+    """Load NVD result cache from disk."""
+    try:
+        if NVD_CACHE_FILE.exists():
+            return json.loads(NVD_CACHE_FILE.read_text())
+    except Exception:
+        pass
+    return {}
+
+
+def _save_nvd_cache(cache: dict) -> None:
+    """Persist NVD result cache to disk."""
+    try:
+        NVD_CACHE_FILE.write_text(json.dumps(cache))
+    except Exception:
+        pass
 
 
 def fetch_cvss_for_cves(cve_ids: List[str], api_key: str = None) -> Dict[str, Any]:
@@ -33,7 +58,18 @@ def fetch_cvss_for_cves(cve_ids: List[str], api_key: str = None) -> Dict[str, An
     # Get rate limiter with appropriate limits
     limiter = get_rate_limiter("nvd", has_api_key=bool(api_key))
     
+    # Load local result cache — fresh entries skip the API call entirely
+    cache = _load_nvd_cache()
+    now = time.time()
+    cache_dirty = False
+    
     for cve_id in cve_ids:
+        # Serve from cache if fresh (zero rate-limit cost)
+        cached = cache.get(cve_id)
+        if cached and (now - cached.get("timestamp", 0)) < NVD_CACHE_TTL:
+            results[cve_id] = cached["data"]
+            continue
+        
         try:
             # Enforce rate limit before making request — shared endpoint key
             # so the local sliding window accumulates all NVD requests (not one deque per CVE)
@@ -52,6 +88,9 @@ def fetch_cvss_for_cves(cve_ids: List[str], api_key: str = None) -> Dict[str, An
                     data = json.load(response)
                     if data.get("vulnerabilities"):
                         results[cve_id] = data["vulnerabilities"][0].get("cve", {})
+                        # Cache successful results (not errors — CVE may appear later)
+                        cache[cve_id] = {"timestamp": now, "data": results[cve_id]}
+                        cache_dirty = True
                     else:
                         results[cve_id] = {"error": "CVE not found"}
                 else:
@@ -84,6 +123,9 @@ def fetch_cvss_for_cves(cve_ids: List[str], api_key: str = None) -> Dict[str, An
                 results[cve_id] = {"error": f"HTTP {e.code}: {e.reason}"}
         except (URLError, Exception) as e:
             results[cve_id] = {"error": str(e)}
+    
+    if cache_dirty:
+        _save_nvd_cache(cache)
     
     return results
 

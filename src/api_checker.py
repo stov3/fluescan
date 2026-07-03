@@ -8,6 +8,7 @@ Tests connectivity to all required APIs and allows setting up private API keys.
 import sys
 import json
 import time
+import urllib.parse
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from typing import Dict, Tuple, Any
@@ -114,6 +115,94 @@ def test_kev_api(config: ConfigManager) -> Tuple[bool, str]:
         return False, str(e)
 
 
+def test_github_api(config: ConfigManager) -> Tuple[bool, str]:
+    """
+    Test GitHub Search API connectivity.
+    
+    Returns:
+        Tuple of (success, message)
+    """
+    try:
+        # Test with a simple search
+        query = "exploit"
+        url = f"https://api.github.com/search/repositories?q={urllib.parse.quote(query)}&per_page=1"
+        
+        headers = {
+            "User-Agent": "api-checker/1.0",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        
+        token = config.get_github_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        
+        request = Request(url, headers=headers)
+        with urlopen(request, timeout=10) as response:
+            if response.status == 200:
+                data = json.load(response)
+                if "total_count" in data:
+                    status = "✓ Working"
+                    if token:
+                        status += " (with GitHub token — 30 req/min)"
+                    else:
+                        status += " (unauthenticated — 10 req/min)"
+                    return True, status
+                else:
+                    return False, "API responded but no data returned"
+            else:
+                return False, f"HTTP {response.status}"
+    except HTTPError as e:
+        if e.code == 401:
+            return False, "HTTP 401 Unauthorized (invalid GitHub token?)"
+        elif e.code == 403:
+            return False, "HTTP 403 Forbidden (rate limited or API rate limit exceeded)"
+        elif e.code == 422:
+            return False, "HTTP 422 Validation error (invalid query)"
+        else:
+            return False, f"HTTP {e.code}: {e.reason}"
+    except URLError as e:
+        return False, f"Connection error: {e.reason}"
+    except Exception as e:
+        return False, str(e)
+
+
+def test_exploitdb_api(config: ConfigManager) -> Tuple[bool, str]:
+    """
+    Test ExploitDB CSV connectivity (used for Metasploit/exploit detection).
+    
+    Returns:
+        Tuple of (success, message)
+    """
+    try:
+        url = "https://gitlab.com/exploit-database/exploitdb/-/raw/main/files_exploits.csv"
+        
+        headers = {"User-Agent": "api-checker/1.0"}
+        request = Request(url, headers=headers)
+        
+        with urlopen(request, timeout=15) as response:
+            if response.status == 200:
+                # Just check we can read the header
+                sample = response.read(500).decode("utf-8", errors="replace")
+                if "id,file,description" in sample:
+                    return True, "✓ Working (ExploitDB CSV accessible)"
+                else:
+                    return False, "Unexpected CSV format"
+            elif response.status == 304:
+                return True, "✓ Working (cached via ETag)"
+            else:
+                return False, f"HTTP {response.status}"
+    except HTTPError as e:
+        if e.code == 304:
+            return True, "✓ Working (cached)"
+        else:
+            return False, f"HTTP {e.code}: {e.reason}"
+    except URLError as e:
+        return False, f"Connection error: {e.reason}"
+    except Exception as e:
+        return False, str(e)
+
+
 def run_diagnostics() -> int:
     """Run API diagnostics and return exit code."""
     config = get_config()
@@ -141,6 +230,18 @@ def run_diagnostics() -> int:
     success, msg = test_kev_api(config)
     results["KEV"] = (success, msg)
     print(f"   {msg}")
+    time.sleep(0.5)
+    
+    print("\n4. Testing GitHub Search API (PoC detection)...")
+    success, msg = test_github_api(config)
+    results["GitHub Search"] = (success, msg)
+    print(f"   {msg}")
+    time.sleep(0.5)
+    
+    print("\n5. Testing ExploitDB CSV (Metasploit/exploit detection)...")
+    success, msg = test_exploitdb_api(config)
+    results["ExploitDB"] = (success, msg)
+    print(f"   {msg}")
     
     # Print summary
     print("\n" + "-" * 70)
@@ -155,11 +256,11 @@ def run_diagnostics() -> int:
                 print(f"  - {api}")
     
     # Print API key status
-    print("\nAPI Key Status:")
+    print("\nOptional API Keys / Tokens:")
     print(f"  - NVD API Key: {'✓ Configured' if config.has_nvd_api_key() else '✗ Not configured'}")
-    print(f"    (Benefit: 5 req/sec instead of 5 req/min)")
-    print(f"  - EPSS API Key: {'✓ Configured' if config.has_epss_api_key() else '✗ Not configured'}")
-    print(f"    (Public API available without key)")
+    print(f"    Benefit: 5 req/sec instead of 5 req/min (60× faster for large batches)")
+    print(f"  - GitHub Token: {'✓ Configured' if config.has_github_token() else '✗ Not configured'}")
+    print(f"    Benefit: 30 req/min + Metasploit module detection via repo code search")
     
     print("=" * 70)
     

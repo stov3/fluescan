@@ -177,6 +177,7 @@ class RateLimiter:
         self.state_manager = state_manager  # For persistent state fallback
         self.has_header_data = False  # Track if we got real data from headers
         self.was_rate_limited = False  # Track if this API hit rate limit during this run
+        self._last_announced_reset_time = None  # Track reset_time of last announced rate limit
         
         # Select rate limit based on API name and key status
         if api_name == "nvd":
@@ -267,14 +268,16 @@ class RateLimiter:
             self.request_times[endpoint].append(time.time())
             return
 
-        # First hit — mark it and announce
+        # Only announce rate limit once per reset period (avoid spam)
         self.was_rate_limited = True
-        key_status = "with API key" if self.has_api_key else "without API key"
-        sys.stdout.write(
-            f"\n⏸  Rate limit reached for {self.api_name.upper()} API "
-            f"({key_status}) — {self.friendly_limit}\n"
-        )
-        sys.stdout.flush()
+        if self.reset_time != self._last_announced_reset_time:
+            self._last_announced_reset_time = self.reset_time
+            key_status = "with API key" if self.has_api_key else "without API key"
+            sys.stdout.write(
+                f"\n⏸  Rate limit reached for {self.api_name.upper()} API "
+                f"({key_status}) — {self.friendly_limit}\n"
+            )
+            sys.stdout.flush()
 
         retry_count = 0
         backoff_base = 1.0  # seconds; doubles each retry (exponential backoff)

@@ -20,15 +20,22 @@ from rate_limiter import get_rate_limiter, update_rate_limit_from_response, hand
 GITHUB_API_VERSION = "2022-11-28"
 GITHUB_ACCEPT       = "application/vnd.github+json"
 
-# ETag cache file — conditional requests that return 304 do NOT count against rate limit
+# ETag cache file — conditional requests that return 304 do NOT count against rate limit.
+# Each entry stores BOTH the ETag and the response items so a 304 can reuse the data.
 ETAG_CACHE_FILE = Path(".github_etag_cache.json")
+
+# Per-CVE result cache — fresh entries skip the GitHub API entirely on re-runs
+POC_CACHE_FILE = Path(".github_poc_cache.json")
+POC_CACHE_TTL = 24 * 3600  # 24 hours
 
 
 def _load_etag_cache() -> dict:
-    """Load ETag cache from disk."""
+    """Load ETag cache from disk. Ignores legacy entries without a body."""
     try:
         if ETAG_CACHE_FILE.exists():
-            return json.loads(ETAG_CACHE_FILE.read_text())
+            cache = json.loads(ETAG_CACHE_FILE.read_text())
+            # Drop legacy string-only entries (etag without cached body)
+            return {k: v for k, v in cache.items() if isinstance(v, dict)}
     except Exception:
         pass
     return {}
@@ -37,7 +44,25 @@ def _load_etag_cache() -> dict:
 def _save_etag_cache(cache: dict) -> None:
     """Persist ETag cache to disk."""
     try:
-        ETAG_CACHE_FILE.write_text(json.dumps(cache, indent=2))
+        ETAG_CACHE_FILE.write_text(json.dumps(cache))
+    except Exception:
+        pass
+
+
+def _load_poc_cache() -> dict:
+    """Load per-CVE PoC result cache from disk."""
+    try:
+        if POC_CACHE_FILE.exists():
+            return json.loads(POC_CACHE_FILE.read_text())
+    except Exception:
+        pass
+    return {}
+
+
+def _save_poc_cache(cache: dict) -> None:
+    """Persist per-CVE PoC result cache to disk."""
+    try:
+        POC_CACHE_FILE.write_text(json.dumps(cache))
     except Exception:
         pass
 
@@ -158,12 +183,12 @@ def search_github_poc(cve_id):
     etag_cache = _load_etag_cache()
 
     try:
-        # 2 targeted queries instead of 7 — in:name,description scopes the
-        # keyword to repo name/description, cutting false positives while
-        # covering the same PoC repos the language-based queries found.
+        # Single query per CVE (was 2) — PoC repos are almost always named
+        # after the CVE ID, so matching the bare ID in name/description covers
+        # both "exploit" and "poc" labelled repos. Exploit-context filtering
+        # below removes database/tracker noise. This halves GitHub API usage.
         queries = [
-            f'{cve_id} in:name,description exploit',
-            f'{cve_id} in:name,description poc',
+            f'{cve_id} in:name,description',
         ]
         
         repos = []
@@ -182,65 +207,72 @@ def search_github_poc(cve_id):
                 # Enforce rate limit before each query (shared window)
                 limiter.acquire(GITHUB_ENDPOINT)
                 
-                # GitHub Search API — best-practice headers + ETag conditional request
+                # GitHub Search API — best-practice headers + ETag conditional request.
+                # per_page=50 costs the same 1 request as 20 but improves recall
+                # for the broader single-query search.
                 search_url = (
                     f"https://api.github.com/search/repositories"
                     f"?q={urllib.parse.quote(query)}"
-                    f"&sort=stars&order=desc&per_page=20"
+                    f"&sort=stars&order=desc&per_page=50"
                 )
                 
                 hdrs = _github_headers(token)
                 # Add ETag/If-None-Match for conditional request (304 = free, no rate-limit cost)
                 cache_key = search_url
-                if cache_key in etag_cache:
-                    hdrs["If-None-Match"] = etag_cache[cache_key]
+                cached_entry = etag_cache.get(cache_key)
+                if cached_entry and cached_entry.get("etag"):
+                    hdrs["If-None-Match"] = cached_entry["etag"]
 
                 req = urllib.request.Request(search_url, headers=hdrs)
                 
+                items = None
                 try:
                     with urllib.request.urlopen(req, timeout=10) as response:
                         update_rate_limit_from_response("github", response.headers)
-                        # Cache ETag for next run
+                        data = json.loads(response.read().decode('utf-8'))
+                        items = data.get('items', [])
+                        # Cache ETag AND response items so a future 304 can reuse the data
                         etag = response.headers.get("ETag") or response.headers.get("etag")
                         if etag:
-                            etag_cache[cache_key] = etag
+                            etag_cache[cache_key] = {"etag": etag, "items": items}
                             _save_etag_cache(etag_cache)
-                        data = json.loads(response.read().decode('utf-8'))
                 except urllib.error.HTTPError as http_err:
-                    if http_err.code == 304:
-                        # Not Modified — data unchanged, skip this query (costs nothing)
-                        continue
-                    raise
+                    if http_err.code == 304 and cached_entry:
+                        # Not Modified — reuse cached items (request was free)
+                        items = cached_entry.get("items", [])
+                    else:
+                        raise
+                
+                # Process results (fresh or 304-cached)
+                for item in items or []:
+                    url = item.get('html_url')
+                    name = item.get('name', 'Unknown')
+                    description = item.get('description', '')
+                    language = item.get('language', 'Unknown')
+                    stars = item.get('stargazers_count', 0)
                     
-                    for item in data.get('items', []):
-                        url = item.get('html_url')
-                        name = item.get('name', 'Unknown')
-                        description = item.get('description', '')
-                        language = item.get('language', 'Unknown')
-                        stars = item.get('stargazers_count', 0)
-                        
-                        # Skip already seen repos
-                        if url in seen_urls:
-                            continue
-                        
-                        # Skip known CVE database/tracker repos (metadata, not exploits)
-                        if is_data_repo(name, description):
-                            continue
-                        
-                        # Require exploit context for queries without explicit exploit keywords
-                        if 'language:' in query:  # Language-based queries need stronger filtering
-                            if not has_exploit_context(description, language):
-                                continue
-                        
-                        seen_urls.add(url)
-                        repos.append({
-                            'name': name,
-                            'url': url,
-                            'stars': stars,
-                            'description': description,
-                            'language': language,
-                            'poc_keywords': extract_matching_keywords(item, language)
-                        })
+                    # Skip already seen repos
+                    if url in seen_urls:
+                        continue
+                    
+                    # Skip known CVE database/tracker repos (metadata, not exploits)
+                    if is_data_repo(name, description):
+                        continue
+                    
+                    # Require exploit context — the query no longer includes
+                    # explicit exploit/poc keywords, so filter every result
+                    if not has_exploit_context(description, language):
+                        continue
+                    
+                    seen_urls.add(url)
+                    repos.append({
+                        'name': name,
+                        'url': url,
+                        'stars': stars,
+                        'description': description,
+                        'language': language,
+                        'poc_keywords': extract_matching_keywords(item, language)
+                    })
             
             except urllib.error.HTTPError as e:
                 if e.code == 429 or e.code == 403:
@@ -327,8 +359,26 @@ def fetch_github_pocs(cve_ids):
         }
     """
     results = {}
+    cache = _load_poc_cache()
+    now = time.time()
+    cache_dirty = False
+    
     for cve_id in cve_ids:
-        results[cve_id] = search_github_poc(cve_id)
+        # Serve from cache if fresh (zero rate-limit cost on re-runs)
+        cached = cache.get(cve_id)
+        if cached and (now - cached.get("timestamp", 0)) < POC_CACHE_TTL:
+            results[cve_id] = cached["result"]
+            continue
+        
+        result = search_github_poc(cve_id)
+        results[cve_id] = result
+        # Only cache clean results — errors/rate-limits should retry next run
+        if result.get("error") is None:
+            cache[cve_id] = {"timestamp": now, "result": result}
+            cache_dirty = True
+    
+    if cache_dirty:
+        _save_poc_cache(cache)
     
     return results
 
