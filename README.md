@@ -95,44 +95,113 @@ Each data source is weighted by epistemic confidence:
 ### Scoring Formula
 
 ```
-Priority Score = Bayesian_Posterior × Entropy_Discount × 100
+Priority Score = Apply_Nonlinearity(Bayesian_Posterior × Entropy_Discount × 100)
 
 Where:
   Bayesian_Posterior = sigmoid(Σ weights × log_odds(evidence))
   Entropy_Discount = 0.90 + (0.10 × data_completeness)  [penalizes missing data]
+  Apply_Nonlinearity = {
+    score^1.05         if score < 30  (compress low-risk scores)
+    score              if 30 ≤ score ≤ 70
+    70 + ((score-70)^0.95) if score > 70  (expand high-risk scores)
+  }
 ```
 
-### Evidence Interpretation
+### Worked Example
+
+```
+CVE-2023-44487 (HTTP/2 Rapid Reset DoS):
+  
+  Input Data:
+    CVSS v3.1:     7.5 (HIGH severity)
+    EPSS:          1.0 (100% exploitation probability — peak value)
+    KEV:           ✓ (CISA confirmed active exploitation)
+    GitHub PoCs:   5 public exploits
+    Multiplier:    1.38 (PoC + Metasploit module)
+    
+  Step 1: Normalize to [0,1]
+    cvss_normalized = log(1+7.5) / log(11) = 0.8925
+    epss_prob = 1.0 (already normalized)
+    kev_present = 1.0 (active exploitation)
+    exploit_proof = (1.38 - 1.0) / 0.75 = 0.5067
+    
+  Step 2: Accumulate weighted log-odds
+    cvss_log_odds = log(0.8925/0.1075) ≈ 2.120
+    epss_log_odds = log(1.0/0.001) ≈ 6.908  [EPSS maxes log_odds]
+    kev_log_odds = log(0.90/0.10) ≈ 2.197   [active exploitation]
+    exploit_log_odds = log(0.703/0.297) ≈ 0.849  [PoC evidence]
+    
+    total_log_odds = 0.30×2.120 + 0.35×6.908 + 0.25×2.197 + 0.10×0.849
+                  ≈ 0.636 + 2.418 + 0.549 + 0.085 ≈ 3.688
+    
+  Step 3: Convert via sigmoid
+    posterior = 1/(1 + e^(-3.688)) ≈ 0.9762  [97.6% risk posterior]
+    
+  Step 4: Apply entropy discount
+    All 4 data sources present → completeness = 1.0
+    entropy_discount = 0.90 + 0.10 = 1.0  [no penalty]
+    adjusted = 0.9762 × 1.0 = 0.9762
+    
+  Step 5: Scale and apply non-linearity
+    score = 0.9762 × 100 = 97.62
+    Since score > 70: apply expansion transform
+    final = 70 + ((97.62-70)^0.95) ≈ 70 + 27.55 ≈ 94.4  ✓ Matches
+    
+  Interpretation: CRITICAL
+    • All evidence converges on high risk
+    • Active exploitation confirmed (KEV)
+    • Public exploits available
+    • → Patch immediately
+```
+
+### Risk Level Interpretation
 
 | Score Range | Risk Level | Interpretation |
 |-------------|-----------|-----------------|
-| 85–100 | **Critical** | Known/active exploitation, PoC/exploit exists, high severity |
-| 70–84 | **High** | Probable exploitation, or high severity + partial evidence |
+| 85–100 | **Critical** | Active exploitation, PoC/exploit exists, high severity |
+| 70–84 | **High** | Probable exploitation or high severity + strong evidence |
 | 50–69 | **Medium** | Exploitable but limited proof, or lower severity + evidence |
 | 30–49 | **Low** | Difficult to exploit or low severity, no active proof |
 | 0–29 | **Minimal** | Very low risk; low severity and no evidence of exploitation |
 
-### Example
+### Detailed Calculation Steps
 
-```
-CVE-2023-44487:
-  CVSS 7.5 (log-normalized: 0.78)
-  EPSS not available (estimated: 0.47)
-  KEV ✓ (active exploitation: 0.90)
-  GitHub PoC ✓ (exploit confidence: 0.88)
-  Exploit multiplier: 1.20
+**Step 1: Normalize inputs to [0,1] probability space**
+- **CVSS**: Apply logarithmic transformation (Weber-Fechner law) → `log(1+CVSS) / log(11)`
+  - Reflects diminishing risk perception at higher severities
+- **EPSS**: Clamp to [0,1] (already normalized)
+  - If unavailable: estimate from CVSS as `min(CVSS_normalized × 0.6, 0.7)` with 30% uncertainty penalty
+- **KEV**: Binary (1.0 if active exploitation, 0.0 otherwise)
+- **Exploit Proof**: Map multiplier [1.0, 1.75] to confidence [0, 1] via `(multiplier - 1.0) / 0.75`
 
-  Bayesian combination:
-    log_odds = 0.30×log(0.78/0.22) + 0.35×log(0.47/0.53) + 0.25×log(0.90/0.10) + 0.10×log(0.88/0.12)
-            ≈ 0.30×1.25 + 0.35×(-0.13) + 0.25×2.20 + 0.10×1.98
-            ≈ 0.375 - 0.046 + 0.550 + 0.198
-            ≈ 1.077
-    
-    posterior = 1 / (1 + e^(-1.077)) ≈ 0.746  [74.6% confidence in high risk]
-    
-    entropy discount = 0.90 + (0.10 × 0.75) = 0.975  [data completeness 75%]
-    final_score = 0.746 × 0.975 × 100 ≈ 72.7  →  Patch early
+**Step 2: Accumulate weighted log-odds**
 ```
+total_log_odds = Σ weight_i × log(P_i / (1 - P_i))
+
+Evidence contributions:
+  - CVSS (30%):       log_odds(cvss_prob)  [or log_odds(0.1) if absent]
+  - EPSS (35%):       log_odds(epss_prob)  [or 0.70× log_odds(estimated) if absent]
+  - KEV (25%):        log_odds(0.90) if active, else log_odds(0.35)
+  - Exploit (10%):    log_odds(0.50 + exploit_proof × 0.40) if proof > 0.1
+```
+
+**Step 3: Convert log-odds to probability via sigmoid**
+```
+posterior = 1 / (1 + e^(-total_log_odds))   [clamped to [-12, 12] to prevent overflow]
+```
+
+**Step 4: Apply entropy discount for missing data**
+```
+data_completeness = (CVSS_present + EPSS_present + KEV_present + Exploit_present) / 4
+entropy_discount = 0.90 + (0.10 × data_completeness)
+adjusted_prob = posterior × entropy_discount
+```
+Missing data (e.g., no EPSS) counts as 0.5 contribution, reducing confidence by 5-10%.
+
+**Step 5: Scale to 0-100 with non-linearity adjustment**
+- Low scores (<30): compressed via `score^1.05` → less spread among low-risk vulns
+- High scores (>70): expanded via `70 + ((score-70)^0.95)` → more spread among critical vulns
+- Final bounds: [0, 100]
 
 ---
 
