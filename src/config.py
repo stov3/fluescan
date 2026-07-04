@@ -21,6 +21,7 @@ class ConfigManager:
     NVD_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
     EPSS_URL = "https://api.first.org/data/v1/epss"
     KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+    VULNCHECK_KEV_URL = "https://api.vulncheck.com/v3/index/vulncheck-kev"
     
     def __init__(self):
         """Initialize configuration manager."""
@@ -28,6 +29,7 @@ class ConfigManager:
             "nvd_api_key":   os.getenv("NVD_API_KEY", ""),
             "epss_api_key":  os.getenv("EPSS_API_KEY", ""),
             "github_token":  os.getenv("GITHUB_TOKEN", ""),
+            "vulncheck_api_token": os.getenv("VULNCHECK_API_TOKEN", ""),
         }
         self._load_env_file()
     
@@ -49,6 +51,8 @@ class ConfigManager:
                                 self.config["epss_api_key"] = value
                             elif key == "GITHUB_TOKEN":
                                 self.config["github_token"] = value
+                            elif key == "VULNCHECK_API_TOKEN":
+                                self.config["vulncheck_api_token"] = value
             except Exception as e:
                 print(f"Warning: Could not read .env file: {e}", file=sys.stderr)
     
@@ -82,6 +86,14 @@ class ConfigManager:
     def has_github_token(self) -> bool:
         """Check if GitHub token is configured."""
         return bool(self.config.get("github_token"))
+
+    def get_vulncheck_api_token(self) -> Optional[str]:
+        """Get VulnCheck API token if configured."""
+        return self.config.get("vulncheck_api_token") or None
+
+    def has_vulncheck_api_token(self) -> bool:
+        """Check if VulnCheck API token is configured."""
+        return bool(self.config.get("vulncheck_api_token"))
     
     def save_to_env_file(self) -> None:
         """Save current configuration to .env file."""
@@ -104,6 +116,11 @@ class ConfigManager:
                 f.write(f'GITHUB_TOKEN="{self.config["github_token"]}"\n')
             else:
                 f.write("# GITHUB_TOKEN=your_token_here\n")
+
+            if self.config.get("vulncheck_api_token"):
+                f.write(f'VULNCHECK_API_TOKEN="{self.config["vulncheck_api_token"]}"\n')
+            else:
+                f.write("# VULNCHECK_API_TOKEN=your_token_here\n")
     
     def prompt_for_keys(self) -> None:
         """Prompt user to enter API keys interactively."""
@@ -137,6 +154,15 @@ class ConfigManager:
             gh_token = input("   Enter GitHub token (or press Enter to skip): ").strip()
             if gh_token:
                 self.config["github_token"] = gh_token
+
+        # VulnCheck token
+        if not self.config.get("vulncheck_api_token"):
+            print("\n4. VulnCheck API token (optional but recommended)")
+            print("   - Adds early-exploitation KEV signal coverage")
+            print("   - Get it at: https://vulncheck.com/")
+            vc_token = input("   Enter VulnCheck token (or press Enter to skip): ").strip()
+            if vc_token:
+                self.config["vulncheck_api_token"] = vc_token
         
         # Save option
         print("\n" + "-" * 60)

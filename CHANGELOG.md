@@ -2,6 +2,71 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.3-alpha] — 2026-07-03
+
+### Added
+- **CVSS attack-vector soft exposure signal** in scoring.
+  - Extracts CVSS `AV` (`N/A/L/P`) from v3.x (with vector fallback) and v2 (mapped from `accessVector`).
+  - Applies soft exposure weight: `N=1.07`, `A=1.03`, `L=0.96`, `P=0.90`, `UNKNOWN=1.00`.
+  - Exposes `attack_vector` and `exposure_weight` in JSON/CSV output.
+- **Explicit KEV display status** per record via `kev_status` (`YES`/`EARLY`/`NO`) to keep UI semantics deterministic.
+
+### Changed
+- **CLI CVE parsing hardened**: positional input now supports both space-separated and comma-separated CVE lists reliably.
+- **Console table expanded**: added `AV` and `ExpW` columns to display the exposure signal directly.
+- **KEV label behavior clarified** in console rendering:
+  - `YES` only when CISA KEV confirms exploitation
+  - `EARLY` for VulnCheck-only KEV
+  - `NO` otherwise
+- **Console output streamlined**: removed Analysis Summary block and Top priority line.
+- **Critical color theme update**: critical/highest-priority rendering now uses bright purple in console output.
+
+### Documentation
+- README updated for:
+  - comma-separated positional CVE support
+  - AV/exposure-weight scoring formula updates
+  - new console table columns (`AV`, `ExpW`)
+  - deterministic KEV status semantics
+
+
+## [0.1.2-alpha] — 2026-07-03
+
+### Added
+- **Dual KEV ingestion**: Added VulnCheck KEV fetcher alongside CISA KEV.
+  - CISA KEV remains the confirmed exploitation signal.
+  - VulnCheck-only entries are treated as early signal with reduced confidence.
+- **OSV fallback fetcher**: Added OSV integration for CVE metadata fallback when NVD data is missing.
+- **EPSS trend enrichment**: Added optional 7-day EPSS delta (`epss_prev_7d`, `epss_delta_7d`) per CVE.
+- **API diagnostics expansion**: `api_checker.py` now validates VulnCheck KEV and OSV endpoints and reports VulnCheck token status.
+- **Configuration expansion**: Added `VULNCHECK_API_TOKEN` support in `.env`, setup prompt, and config manager.
+
+### Changed
+- **Scoring Model Simplified**: Replaced Bayesian log-odds fusion with a transparent weighted risk blend plus hard exploitation override.
+  - New core formula: `(0.30 × CVSS_norm) + (0.40 × EPSS_norm) + (0.20 × KEV_strength) + (0.10 × exploit_norm)`
+  - CVSS normalization simplified to linear scale: `CVSS / 10`
+  - Completeness penalty simplified to: `data_sources_found / 4`
+  - KEV now applies a hard critical floor: `score = max(score, 85)`
+- **CVSS extraction accuracy**: Now falls back to CVSS v3.0 and v2 metrics when v3.1 is absent — older CVEs (pre-2016) no longer score 0 due to missing v3.1 data.
+- **KEV scoring signal refinement**: Replaced binary KEV handling with KEV strength tracking.
+  - `1.0` for CISA-confirmed KEV
+  - `0.4` for VulnCheck-only early KEV
+  - `0.0` otherwise
+- **Critical override behavior**: 85-point floor applies only for CISA-confirmed KEV entries.
+- **Token behavior clarified**: `VULNCHECK_API_TOKEN` is optional; when absent, analysis continues with CISA KEV and all other sources.
+
+### Removed
+- Sigmoid/posterior mapping and log-odds transforms
+- Non-linear high/low score reshaping
+- Synthetic fallback priors for missing EPSS/KEV evidence
+- Deleted unused `nuclei_fetcher.py` module.
+- Dead code cleanup (~300 lines): duplicated report-building loop in `main()`, unused rate-limit statistics display, orphaned console helpers (`countdown_timer`, `print_progress`, `print_rate_limits_enhanced`), unused imports and helpers.
+
+### Rationale
+- Keeps scoring behavior practical and auditable for operators
+- Preserves strongest real-world signal by hard-prioritizing CISA-confirmed active exploitation (KEV)
+- Uses explicit missing-data penalty instead of inferred priors
+
+
 ## [0.1.1-alpha] — 2026-07-03
 
 ### Added

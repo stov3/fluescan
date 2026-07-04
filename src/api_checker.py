@@ -115,6 +115,74 @@ def test_kev_api(config: ConfigManager) -> Tuple[bool, str]:
         return False, str(e)
 
 
+def test_vulncheck_api(config: ConfigManager) -> Tuple[bool, str]:
+    """
+    Test VulnCheck KEV API connectivity.
+
+    Returns:
+        Tuple of (success, message)
+    """
+    token = config.get_vulncheck_api_token()
+    if not token:
+        return True, "◌ Skipped (VULNCHECK_API_TOKEN not configured)"
+
+    try:
+        headers = {
+            "User-Agent": "api-checker/1.0",
+            "Accept": "application/json",
+            "Authorization": f"Bearer {token}",
+            "X-API-Key": token,
+        }
+        request = Request(config.VULNCHECK_KEV_URL, headers=headers)
+        with urlopen(request, timeout=10) as response:
+            if response.status == 200:
+                data = json.load(response)
+                if isinstance(data, dict) and (
+                    isinstance(data.get("data"), list)
+                    or isinstance(data.get("vulnerabilities"), list)
+                    or isinstance(data.get("results"), list)
+                ):
+                    return True, "✓ Working (VulnCheck KEV accessible)"
+                return True, "✓ Working (VulnCheck reachable; schema accepted)"
+            return False, f"HTTP {response.status}"
+    except HTTPError as e:
+        if e.code == 401:
+            return False, "HTTP 401 Unauthorized (invalid VulnCheck token?)"
+        if e.code == 403:
+            return False, "HTTP 403 Forbidden (token lacks access or quota exceeded)"
+        return False, f"HTTP {e.code}: {e.reason}"
+    except URLError as e:
+        return False, f"Connection error: {e.reason}"
+    except Exception as e:
+        return False, str(e)
+
+
+def test_osv_api(config: ConfigManager) -> Tuple[bool, str]:
+    """Test OSV query API connectivity."""
+    try:
+        request = Request(
+            "https://api.osv.dev/v1/vulns/CVE-2023-44487",
+            headers={
+                "User-Agent": "api-checker/1.0",
+                "Accept": "application/json",
+            },
+            method="GET",
+        )
+        with urlopen(request, timeout=10) as response:
+            if response.status == 200:
+                data = json.load(response)
+                if isinstance(data, dict):
+                    return True, "✓ Working (OSV query accessible)"
+                return False, "API responded with unexpected schema"
+            return False, f"HTTP {response.status}"
+    except HTTPError as e:
+        return False, f"HTTP {e.code}: {e.reason}"
+    except URLError as e:
+        return False, f"Connection error: {e.reason}"
+    except Exception as e:
+        return False, str(e)
+
+
 def test_github_api(config: ConfigManager) -> Tuple[bool, str]:
     """
     Test GitHub Search API connectivity.
@@ -228,17 +296,29 @@ def run_diagnostics() -> int:
     
     print("\n3. Testing CISA KEV API (Known Exploited)...")
     success, msg = test_kev_api(config)
-    results["KEV"] = (success, msg)
+    results["CISA KEV"] = (success, msg)
+    print(f"   {msg}")
+    time.sleep(0.5)
+
+    print("\n4. Testing VulnCheck KEV API (Early Exploitation Signal)...")
+    success, msg = test_vulncheck_api(config)
+    results["VulnCheck KEV"] = (success, msg)
+    print(f"   {msg}")
+    time.sleep(0.5)
+
+    print("\n5. Testing OSV API (NVD fallback metadata)...")
+    success, msg = test_osv_api(config)
+    results["OSV"] = (success, msg)
     print(f"   {msg}")
     time.sleep(0.5)
     
-    print("\n4. Testing GitHub Search API (PoC detection)...")
+    print("\n6. Testing GitHub Search API (PoC detection)...")
     success, msg = test_github_api(config)
     results["GitHub Search"] = (success, msg)
     print(f"   {msg}")
     time.sleep(0.5)
     
-    print("\n5. Testing ExploitDB CSV (Metasploit/exploit detection)...")
+    print("\n7. Testing ExploitDB CSV (Metasploit/exploit detection)...")
     success, msg = test_exploitdb_api(config)
     results["ExploitDB"] = (success, msg)
     print(f"   {msg}")
@@ -261,6 +341,8 @@ def run_diagnostics() -> int:
     print(f"    Benefit: 5 req/sec instead of 5 req/min (60× faster for large batches)")
     print(f"  - GitHub Token: {'✓ Configured' if config.has_github_token() else '✗ Not configured'}")
     print(f"    Benefit: 30 req/min + Metasploit module detection via repo code search")
+    print(f"  - VulnCheck Token: {'✓ Configured' if config.has_vulncheck_api_token() else '✗ Not configured'}")
+    print(f"    Benefit: Early KEV signal coverage in addition to CISA KEV")
     
     print("=" * 70)
     

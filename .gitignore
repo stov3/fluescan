@@ -31,6 +31,7 @@ env/
 .exploitdb_cache.json
 .exploitdb_data.csv
 .kev_cache.json
+.vulncheck_kev_cache.json
 .github_etag_cache.json
 .github_poc_cache.json
 .nvd_cache.json

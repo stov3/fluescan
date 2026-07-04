@@ -79,24 +79,6 @@ def _github_headers(token: str = None) -> dict:
     return headers
 
 
-def get_cve_keywords(cve_id):
-    """
-    Extract potential keywords from CVE ID for broader searches.
-    
-    Examples:
-    - CVE-2026-9999 -> ["CVE-2026-9999", "vulnerability"]
-    - Extract from NVD if available in future versions
-    """
-    keywords = [cve_id]
-    # Basic year extraction (CVE-YYYY-...)
-    try:
-        year = cve_id.split('-')[1]
-        # Could add year-based keywords here
-    except:
-        pass
-    return keywords
-
-
 def is_data_repo(repo_name, description):
     """
     Filter out known CVE database/tracking repositories.

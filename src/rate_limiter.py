@@ -156,6 +156,8 @@ class RateLimiter:
         "nvd_with_key":    (5,  1,    "5 requests/second"),   # NVD with key
         "epss":            (30, 60,   "30 requests/minute"),  # EPSS public API
         "kev":             (10, 60,   "10 requests/minute"),  # CISA KEV public API
+        "vulncheck":       (60, 60,   "60 requests/minute"),  # VulnCheck community API
+        "osv":             (60, 60,   "60 requests/minute"),  # OSV public API
         "github_no_token": (10, 60,   "10 requests/minute (unauthenticated search)"),
         "github_token":    (30, 60,   "30 requests/minute (authenticated search)"),
     }
@@ -186,6 +188,10 @@ class RateLimiter:
             limit_key = "epss"
         elif api_name == "kev":
             limit_key = "kev"
+        elif api_name == "vulncheck":
+            limit_key = "vulncheck"
+        elif api_name == "osv":
+            limit_key = "osv"
         elif api_name == "github":
             limit_key = "github_token" if has_api_key else "github_no_token"
         else:
@@ -367,59 +373,6 @@ class RateLimiter:
         if self.state_manager and (remaining is not None or reset_time is not None):
             self.state_manager.update(self.api_name, remaining, reset_time)
     
-    def get_usage_percentage(self) -> float:
-        """
-        Calculate percentage of rate limit used.
-        
-        Returns:
-            Float from 0-100 representing percentage of limit used
-        """
-        if self.remaining_requests is not None:
-            # Use real-time data from API headers
-            used = self.rate_limit - self.remaining_requests
-            return (used / self.rate_limit) * 100
-        else:
-            # Fall back to local tracking
-            total_requests = sum(len(q) for q in self.request_times.values())
-            return (total_requests / self.rate_limit) * 100 if self.rate_limit > 0 else 0
-    
-    def get_stats(self) -> Tuple[str, float]:
-        """Get rate limiter statistics as a string and usage percentage.
-        
-        Returns:
-            Tuple of (stats_string, usage_percentage)
-        """
-        total_requests = sum(len(q) for q in self.request_times.values())
-        usage_pct = self.get_usage_percentage()
-        
-        if self.remaining_requests is not None:
-            source_label = "" if self.has_header_data else " (from cache)"
-            stats = (
-                f"{self.api_name.upper()} API: {self.remaining_requests} remaining "
-                f"({self.friendly_limit}) - {usage_pct:.0f}% used{source_label}"
-            )
-        else:
-            stats = (
-                f"{self.api_name.upper()} API: {total_requests} requests made "
-                f"({self.friendly_limit}) - {usage_pct:.0f}% used"
-            )
-        
-        return stats, usage_pct
-    
-    def reset(self, endpoint: str = "default") -> None:
-        """Reset tracking for an endpoint."""
-        if endpoint in self.request_times:
-            self.request_times[endpoint].clear()
-    
-    def get_estimated_reset_time(self, endpoint: str = "default") -> Optional[float]:
-        """Get estimated time until rate limit resets for an endpoint.
-        
-        Returns:
-            Float seconds until reset, or None if no limit pressure
-        """
-        can_request, wait_time = self.can_make_request(endpoint)
-        return wait_time if not can_request else None
-    
     def was_rate_limited_during_run(self) -> bool:
         """Check if this API was rate-limited at any point during this run.
         
@@ -457,94 +410,6 @@ class GlobalRateLimitManager:
             if limiter.was_rate_limited_during_run():
                 limited.append(limiter.api_name.upper())
         return limited
-    
-    def should_print_stats(self, threshold_percent: float = 80.0) -> bool:
-        """Check if any API has exceeded usage threshold.
-        
-        Args:
-            threshold_percent: Threshold percentage to trigger display (default 80%)
-            
-        Returns:
-            True if any limiter has exceeded threshold, False otherwise
-        """
-        for limiter in self.limiters.values():
-            _, usage_pct = limiter.get_stats()
-            if usage_pct >= threshold_percent:
-                return True
-        return False
-    
-    def print_stats(self, threshold_percent: float = 80.0) -> None:
-        """Print statistics for limiters exceeding threshold.
-        
-        Args:
-            threshold_percent: Only show stats if any API exceeds this % (default 80%)
-        """
-        if not self.limiters:
-            return
-        
-        # Check if any limiter exceeds threshold
-        if not self.should_print_stats(threshold_percent):
-            return
-        
-        # Import console module locally to avoid circular imports
-        try:
-            from console import Colors
-        except ImportError:
-            # Fallback to plain output if console module not available
-            print("\n" + "=" * 70)
-            print("Rate Limit Statistics (>80% usage)")
-            print("=" * 70)
-            for limiter in self.limiters.values():
-                stats, usage_pct = limiter.get_stats()
-                if usage_pct >= threshold_percent:
-                    print(f"  {stats}")
-            print("=" * 70 + "\n")
-            return
-        
-        print(f"\n{Colors.CYAN}{'=' * 70}{Colors.RESET}")
-        print(f"{Colors.BOLD}{Colors.CYAN}Rate Limit Statistics (>80% usage){Colors.RESET}".center(70))
-        print(f"{Colors.CYAN}{'=' * 70}{Colors.RESET}")
-        
-        for limiter in self.limiters.values():
-            stats, usage_pct = limiter.get_stats()
-            if usage_pct >= threshold_percent:
-                # Color code based on usage
-                if usage_pct >= 95:
-                    color = Colors.BRIGHT_RED
-                elif usage_pct >= 90:
-                    color = Colors.RED
-                else:
-                    color = Colors.BRIGHT_YELLOW
-                print(f"  {color}{stats}{Colors.RESET}")
-        
-        print(f"{Colors.CYAN}{'=' * 70}{Colors.RESET}\n")
-    
-    def get_max_wait_time(self) -> Optional[float]:
-        """Get the longest wait time across all rate-limited APIs.
-        
-        Returns:
-            Maximum seconds to wait, or None if no APIs are rate-limited
-        """
-        max_wait = None
-        for limiter in self.limiters.values():
-            wait_time = limiter.get_estimated_reset_time()
-            if wait_time is not None:
-                if max_wait is None or wait_time > max_wait:
-                    max_wait = wait_time
-        return max_wait
-    
-    def get_rate_limited_apis(self) -> list:
-        """Get list of APIs that are currently rate-limited.
-        
-        Returns:
-            List of tuples (api_name, wait_time_seconds)
-        """
-        limited = []
-        for limiter in self.limiters.values():
-            wait_time = limiter.get_estimated_reset_time()
-            if wait_time is not None:
-                limited.append((limiter.api_name, wait_time))
-        return limited
 
 
 # Global manager instance
@@ -554,21 +419,6 @@ _manager = GlobalRateLimitManager()
 def get_rate_limiter(api_name: str, has_api_key: bool = False) -> RateLimiter:
     """Get a rate limiter instance."""
     return _manager.get_limiter(api_name, has_api_key)
-
-
-def print_rate_limit_stats() -> None:
-    """Print all rate limit statistics."""
-    _manager.print_stats()
-
-
-def get_max_wait_time() -> Optional[float]:
-    """Get the longest wait time across all rate-limited APIs."""
-    return _manager.get_max_wait_time()
-
-
-def get_rate_limited_apis() -> list:
-    """Get list of APIs that are currently rate-limited."""
-    return _manager.get_rate_limited_apis()
 
 
 def get_apis_rate_limited_during_run() -> list:
@@ -604,7 +454,7 @@ def update_rate_limit_from_response(api_name: str, response_headers) -> None:
     """Extract and store real-time rate limit info from API response headers.
     
     Args:
-        api_name: Name of the API ('nvd', 'epss', 'kev', 'github', 'metasploit', 'nuclei')
+        api_name: Name of the API ('nvd', 'epss', 'kev', 'vulncheck', 'osv', 'github')
         response_headers: HTTP response headers (urllib.HTTPMessage or dict-like)
     """
     try:

@@ -6,6 +6,7 @@ Fetch EPSS (Exploit Prediction Scoring System) data for specific CVEs.
 import csv
 import json
 import sys
+from datetime import datetime, timedelta
 from typing import List, Dict, Any
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
@@ -15,6 +16,38 @@ from rate_limiter import get_rate_limiter, update_rate_limit_from_response, hand
 
 
 EPSS_URL = "https://api.first.org/data/v1/epss"
+
+
+def _fetch_epss_batch(cve_ids: List[str], date: str = None) -> Dict[str, Any]:
+    """Fetch EPSS records for all CVEs in one request, optionally for a historical date."""
+    if not cve_ids:
+        return {}
+
+    limiter = get_rate_limiter("epss", has_api_key=False)
+    cve_param = ",".join(cve_ids)
+    query = {"cve": cve_param}
+    if date:
+        query["date"] = date
+
+    batch_url = f"{EPSS_URL}?{urlencode(query)}"
+    request_obj = Request(batch_url, headers={"User-Agent": "epss-fetcher/1.0"})
+
+    limiter.acquire("epss_batch")
+    try:
+        with urlopen(request_obj, timeout=30) as response:
+            update_rate_limit_from_response("epss", response.headers)
+            data = json.load(response)
+    except HTTPError as e:
+        if e.code == 429:
+            handle_rate_limit_error("epss", e.code, e.headers)
+            limiter.acquire("epss_batch_retry")
+            with urlopen(request_obj, timeout=30) as response:
+                update_rate_limit_from_response("epss", response.headers)
+                data = json.load(response)
+        else:
+            raise
+
+    return {item["cve"].upper(): item for item in data.get("data", [])}
 
 
 def fetch_epss_for_cves(cve_ids: List[str]) -> Dict[str, Any]:
@@ -27,36 +60,36 @@ def fetch_epss_for_cves(cve_ids: List[str]) -> Dict[str, Any]:
     if not cve_ids:
         return results
 
-    limiter = get_rate_limiter("epss", has_api_key=False)
-
-    # Build a single batched URL for all CVEs
-    cve_param = ",".join(cve_ids)
-    batch_url = f"{EPSS_URL}?cve={cve_param}"
-    request_obj = Request(batch_url, headers={"User-Agent": "epss-fetcher/1.0"})
-
     try:
-        limiter.acquire("epss_batch")
+        # Current EPSS snapshot
+        found = _fetch_epss_batch(cve_ids)
 
+        # Historical snapshot for trend delta (best-effort; ignore errors).
+        past_date = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
         try:
-            with urlopen(request_obj, timeout=30) as response:
-                update_rate_limit_from_response("epss", response.headers)
-                data = json.load(response)
-        except HTTPError as e:
-            if e.code == 429:
-                handle_rate_limit_error("epss", e.code, e.headers)
-                limiter.acquire("epss_batch_retry")
-                with urlopen(request_obj, timeout=30) as response:
-                    update_rate_limit_from_response("epss", response.headers)
-                    data = json.load(response)
-            else:
-                raise
-
-        # Index returned records by CVE ID (upper-case)
-        found = {item["cve"].upper(): item for item in data.get("data", [])}
+            found_past = _fetch_epss_batch(cve_ids, date=past_date)
+        except Exception:
+            found_past = {}
 
         for cve_id in cve_ids:
             upper = cve_id.upper()
-            results[upper] = found.get(upper, {"error": "CVE not found in EPSS database"})
+            current = found.get(upper)
+            if not current:
+                results[upper] = {"error": "CVE not found in EPSS database"}
+                continue
+
+            row = dict(current)
+            past = found_past.get(upper)
+            if past:
+                try:
+                    cur_val = float(current.get("epss", 0.0))
+                    past_val = float(past.get("epss", 0.0))
+                    row["epss_prev_7d"] = round(past_val, 6)
+                    row["epss_delta_7d"] = round(cur_val - past_val, 6)
+                except (ValueError, TypeError):
+                    pass
+
+            results[upper] = row
 
     except HTTPError as e:
         err = f"HTTP {e.code}: {e.reason}"

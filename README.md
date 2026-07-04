@@ -1,9 +1,7 @@
 # vuln-prioritize
 
-> **v0.1.1-alpha** — Bayesian scoring algorithm, API checker completeness, rate limiting optimizations.
-> ✅ **Completed**: Bayesian log-odds prioritization · All 5 API checks · EPSS batching · ETag caching · Exponential backoff
 
-A command-line tool that combines five public data sources into a single **0–100 priority score** per CVE, so you know which vulnerabilities to patch first.
+A command-line tool that combines multiple public data sources into a single **0–100 priority score** per CVE, so you know which vulnerabilities to patch first.
 
 [![Python 3.7+](https://img.shields.io/badge/python-3.7%2B-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -19,11 +17,13 @@ Each CVE is scored by pulling live data from:
 |--------|----------|------------------|
 | **CVSS v3.1** | NVD | Base severity (0–10) |
 | **EPSS** | FIRST | Probability of exploitation in the wild |
-| **KEV** | CISA | Confirmed active exploitation |
+| **KEV (Confirmed)** | CISA | Confirmed active exploitation |
+| **KEV (Early signal)** | VulnCheck | Earlier exploitation evidence before CISA inclusion |
 | **GitHub PoCs** | GitHub API | Public proof-of-concept code exists |
 | **ExploitDB / MSF** | ExploitDB CSV + Metasploit Framework | Working exploit / Metasploit module exists |
+| **OSV fallback** | OSV.dev | Metadata/CVSS fallback when NVD is missing or delayed |
 
-Scores are combined using Bayesian evidence inference (log-odds → sigmoid), then multiplied by exploit availability factors, all normalized to 0–100.
+Scores are combined using a weighted risk blend with KEV signal weighting and a CISA-confirmed critical floor, normalized to 0–100.
 
 ---
 
@@ -49,6 +49,9 @@ python3 vuln-prioritize.py CVE-2024-1234
 # Multiple CVEs — sorted by priority, highest risk first
 python3 vuln-prioritize.py CVE-2024-1234 CVE-2023-44487 CVE-2022-0847
 
+# Multiple CVEs (comma-separated also supported)
+python3 vuln-prioritize.py CVE-2024-1234, CVE-2023-44487, CVE-2022-0847
+
 # From a file (one CVE per line, # = comment)
 python3 vuln-prioritize.py --cves-file examples/sample_cves.txt
 
@@ -68,91 +71,91 @@ python3 vuln-prioritize.py --check-apis   # test all API connections
 python3 vuln-prioritize.py --setup        # configure API keys interactively
 ```
 
+Positional CVE input accepts both space-separated and comma-separated formats.
+
 ---
 
 ## Scoring Algorithm
 
-The priority score uses **Bayesian evidence combination** to fuse multiple vulnerability data sources into a single 0–100 confidence score.
-
-### Theoretical Foundation
-
-**Bayesian Log-Odds Combination** (Jeffreys' method)
-- Each data source is treated as independent evidence of vulnerability risk
-- Evidence is combined using log-odds ratios: `log_odds = Σ(weight_i × log(P_i / (1 - P_i)))`
-- Result is converted back to probability using logistic sigmoid: `P = 1 / (1 + e^(-log_odds))`
-
-**Weber-Fechner Law for CVSS**
-- Human perception of risk is logarithmic, not linear
-- CVSS is normalized as: `CVSS_prob = log(1 + CVSS) / log(11)` to reflect diminishing returns at higher severities
-
-**Source Reliability Weights**
-Each data source is weighted by epistemic confidence:
-- **EPSS (35%)** — Highest weight; statistically modeled exploitation probability
-- **CVSS (30%)** — Authoritative but not exploit-specific
-- **KEV (25%)** — Strong empirical evidence but lagging indicator
-- **Exploit proof (10%)** — Direct proof but rare in dataset
+The priority score uses a **weighted risk blend with exploitation override** to keep scoring transparent and practical.
 
 ### Scoring Formula
 
 ```
-Priority Score = Apply_Nonlinearity(Bayesian_Posterior × Entropy_Discount × 100)
+raw_score = (0.30 × cvss_norm)
+          + (0.40 × epss_norm)
+          + (0.20 × kev_strength)
+          + (0.10 × exploit_norm)
 
-Where:
-  Bayesian_Posterior = sigmoid(Σ weights × log_odds(evidence))
-  Entropy_Discount = 0.90 + (0.10 × data_completeness)  [penalizes missing data]
-  Apply_Nonlinearity = {
-    score^1.05         if score < 30  (compress low-risk scores)
-    score              if 30 ≤ score ≤ 70
-    70 + ((score-70)^0.95) if score > 70  (expand high-risk scores)
-  }
+priority_score = raw_score × 100 × completeness_factor × exposure_weight
+
+if cisa_kev_confirmed:
+    priority_score = max(priority_score, 85)
 ```
+
+### Normalization Rules
+
+- **cvss_norm** = `CVSS / 10` (clamped to [0,1])
+- **epss_norm** = `EPSS` (already [0,1], or unavailable)
+- **kev_strength**:
+  - `1.0` = in CISA KEV (confirmed exploitation)
+  - `0.4` = VulnCheck-only KEV early signal (reduced confidence weight)
+  - `0.0` = no KEV signal
+- **exploit_norm**:
+  - `0.0` = no exploit signal
+  - `0.5` = GitHub PoC only
+  - `1.0` = Metasploit module present (with or without PoC)
+- **exposure_weight** (from CVSS `AV:` soft signal):
+  - `1.07` = `AV:N` (network reachable)
+  - `1.03` = `AV:A` (adjacent network)
+  - `0.96` = `AV:L` (local)
+  - `0.90` = `AV:P` (physical)
+  - `1.00` = unknown/unavailable
+
+### Completeness Factor
+
+To avoid overconfidence when data is missing:
+
+```
+completeness_factor = data_sources_found / 4
+```
+
+In practice:
+- CVSS missing reduces confidence
+- EPSS missing reduces confidence
+- KEV and exploit channels are always evaluated as explicit yes/no signals
 
 ### Worked Example
 
 ```
 CVE-2023-44487 (HTTP/2 Rapid Reset DoS):
-  
-  Input Data:
-    CVSS v3.1:     7.5 (HIGH severity)
-    EPSS:          1.0 (100% exploitation probability — peak value)
-    KEV:           ✓ (CISA confirmed active exploitation)
-    GitHub PoCs:   5 public exploits
-    Multiplier:    1.38 (PoC + Metasploit module)
-    
-  Step 1: Normalize to [0,1]
-    cvss_normalized = log(1+7.5) / log(11) = 0.8925
-    epss_prob = 1.0 (already normalized)
-    kev_present = 1.0 (active exploitation)
-    exploit_proof = (1.38 - 1.0) / 0.75 = 0.5067
-    
-  Step 2: Accumulate weighted log-odds
-    cvss_log_odds = log(0.8925/0.1075) ≈ 2.1163
-    epss_log_odds = log(1.0/0.0001) ≈ 9.2102  [EPSS maxes log_odds]
-    kev_log_odds = log(0.90/0.10) ≈ 2.1972   [active exploitation]
-    exploit_posterior = 0.50 + (0.5067 × 0.40) = 0.7027
-    exploit_log_odds = log(0.7027/0.2973) ≈ 0.8600  [PoC evidence]
-    
-    total_log_odds = 0.30×2.1163 + 0.35×9.2102 + 0.25×2.1972 + 0.10×0.8600
-                  ≈ 0.6349 + 3.2236 + 0.5493 + 0.0860 ≈ 4.4938
-    
-  Step 3: Convert via sigmoid
-    posterior = 1/(1 + e^(-4.4938)) ≈ 0.9889  [98.9% risk posterior]
-    
-  Step 4: Apply entropy discount
-    All 4 data sources present → completeness = 1.0
-    entropy_discount = 0.90 + 0.10 = 1.0  [no penalty]
-    adjusted = 0.9889 × 1.0 = 0.9889
-    
-  Step 5: Scale and apply non-linearity
-    score = 0.9889 × 100 = 98.89
-    Since score > 70: apply expansion transform
-    final = 70 + ((98.89-70)^0.95) ≈ 70 + 24.42 ≈ 94.4  ✓ Matches
-    
-  Interpretation: CRITICAL
-    • All evidence converges on high risk
-    • Active exploitation confirmed (KEV)
-    • Public exploits available
-    • → Patch immediately
+
+Input:
+  CVSS = 7.5
+  EPSS = 1.00
+  CISA KEV = YES
+  VulnCheck KEV = YES
+  PoC = YES
+  Metasploit = YES
+
+Normalize:
+  cvss_norm = 7.5 / 10 = 0.75
+  epss_norm = 1.00
+  kev_strength = 1.0
+  exploit_norm = 1.0
+  exposure_weight = 1.07   # AV:N
+
+Weighted blend:
+  raw_score = (0.30×0.75) + (0.40×1.00) + (0.20×1.0) + (0.10×1.0)
+            = 0.225 + 0.400 + 0.200 + 0.100
+            = 0.925
+
+Completeness:
+  completeness_factor = 4/4 = 1.0
+  score = 0.925 × 100 × 1.0 × 1.07 = 98.975
+
+Critical override (CISA-confirmed only):
+  score = max(98.975, 85) = 98.975
 ```
 
 ### Risk Level Interpretation
@@ -165,70 +168,37 @@ CVE-2023-44487 (HTTP/2 Rapid Reset DoS):
 | 30–49 | **Low** | Difficult to exploit or low severity, no active proof |
 | 0–29 | **Minimal** | Very low risk; low severity and no evidence of exploitation |
 
-### Detailed Calculation Steps
+### Design Rationale
 
-**Step 1: Normalize inputs to [0,1] probability space**
-- **CVSS**: Apply logarithmic transformation (Weber-Fechner law) → `log(1+CVSS) / log(11)`
-  - Reflects diminishing risk perception at higher severities
-- **EPSS**: Clamp to [0,1] (already normalized)
-  - If unavailable: estimate from CVSS as `min(CVSS_normalized × 0.6, 0.7)` with 30% uncertainty penalty
-- **KEV**: Binary (1.0 if active exploitation, 0.0 otherwise)
-- **Exploit Proof**: Map multiplier [1.0, 1.75] to confidence [0, 1] via `(multiplier - 1.0) / 0.75`
-
-**Step 2: Accumulate weighted log-odds**
-```
-total_log_odds = Σ weight_i × log(P_i / (1 - P_i))
-
-Evidence contributions:
-  - CVSS (30%):       log_odds(cvss_prob)  [or log_odds(0.1) if absent]
-  - EPSS (35%):       log_odds(epss_prob)  [or 0.70× log_odds(estimated) if absent]
-  - KEV (25%):        log_odds(0.90) if active, else log_odds(0.35)
-  - Exploit (10%):    log_odds(0.50 + exploit_proof × 0.40) if proof > 0.1
-```
-
-**Step 3: Convert log-odds to probability via sigmoid**
-```
-posterior = 1 / (1 + e^(-total_log_odds))   [clamped to [-12, 12] to prevent overflow]
-```
-
-**Step 4: Apply entropy discount for missing data**
-```
-data_available = (CVSS_present ? 1.0 : 0.25)
-               + (EPSS_present ? 1.0 : 0.50)
-               + (KEV_present ? 1.0 : 0.50)
-               + (Exploit_present ? 1.0 : 0.30)
-
-data_completeness = data_available / 4.0
-entropy_discount = 0.90 + (0.10 × data_completeness)  [range: 0.90-1.00]
-adjusted_prob = posterior × entropy_discount
-```
-Missing data reduces entropy by 5–10%:
-- All sources present → 1.0 (no penalty)
-- Missing EPSS → 0.975 (2.5% penalty)
-- Missing all sources → 0.9388 (6.12% penalty)
-
-**Step 5: Scale to 0-100 with non-linearity adjustment**
-- Low scores (<30): compressed via `score^1.05` → less spread among low-risk vulns
-- High scores (>70): expanded via `70 + ((score-70)^0.95)` → more spread among critical vulns
-- Final bounds: [0, 100]
+- Linear blending is easy to audit and explain to operators.
+- EPSS gets the largest weight as the strongest forward-looking exploitation signal.
+- CISA KEV remains the hard-confirmation signal and enforces a critical floor.
+- VulnCheck KEV adds earlier exploitation evidence with a reduced confidence weight.
+- CVSS `AV:` adds a small exposure nudge to distinguish likely internet-facing vs internal-only paths.
+- EPSS includes optional 7-day delta enrichment for trend-aware triage.
+- Missing data is handled transparently by the completeness factor instead of synthetic priors.
 
 ---
 
 ## Console Output
 
-Results are **sorted by priority** (highest first) and colour-coded:
+Results are **sorted by priority** (highest first) and colour-coded.
+Console output now shows the prioritized table and completion line only.
 
 ```
-Rank   CVE ID             Priority    CVSS   Severity   EPSS      KEV   PoC   Multiplier
-═════════════════════════════════════════════════════════════════════════════════════════════
-1      CVE-2023-44487     94.4        7.5    HIGH       1.00      YES   YES   1.38×
-2      CVE-2024-50379     76.3        9.8    CRITICAL   0.44      NO    YES   1.20×
-3      CVE-2026-28779     30.7        6.4    MEDIUM     0.02      NO    YES   1.38×
+Rank   CVE ID             Priority    CVSS   Severity   EPSS   AV   ExpW    KEV    PoC   Multiplier
+══════════════════════════════════════════════════════════════════════════════════════════════════════
+1      CVE-2023-44487     98.97       7.5    HIGH       1.00   N    1.07x   YES    YES   1.38x
+2      CVE-2020-1472      85.00       5.5    MEDIUM     1.00   L    0.96x   YES    YES   1.38x
+3      CVE-2024-50379     55.50       9.8    CRITICAL   0.44   N    1.07x   NO     YES   1.20x
 ```
+
+- `KEV` values are explicit: `YES` (CISA confirmed), `EARLY` (VulnCheck-only), `NO` (no KEV signal).
+- `AV` and `ExpW` show CVSS attack vector and the soft exposure weight used in scoring.
 
 | Colour | Score | Action |
 |--------|-------|--------|
-| 🔴 Bright Red | ≥ 80 | Patch immediately |
+| 🟣 Bright Purple | ≥ 80 | Patch immediately |
 | 🔴 Red | ≥ 60 | Patch soon |
 | 🟠 Amber | ≥ 40 | Patch this month |
 | 🟡 Yellow | ≥ 20 | Patch when possible |
@@ -243,8 +213,10 @@ The tool enforces per-API rate limits automatically. When a limit is reached it 
 | API | Unauthenticated | With key/token | Local cache |
 |-----|----------------|----------------|-------------|
 | NVD (CVSS) | 5 req/min | 5 req/sec (×60) | 24h per-CVE result cache |
-| EPSS | 30 req/min (batch — 1 call for all CVEs) | — | — |
-| KEV | One request (cached with `If-Modified-Since`) | — | Conditional cache |
+| EPSS (+ trend) | 30 req/min (batch) | — | — |
+| CISA KEV | One request (cached with `If-Modified-Since`) | — | Conditional cache |
+| VulnCheck KEV | — | 60 req/min (token) | 6h cache |
+| OSV fallback | 60 req/min | — | — |
 | GitHub Search | 10 req/min (1 query/CVE) | 30 req/min (1 query/CVE) | 24h per-CVE result cache + ETag |
 | ExploitDB CSV | One download (ETag-cached, free on re-runs) | — | ETag cache |
 
@@ -269,6 +241,15 @@ export NVD_API_KEY=your_key_here
 # No scopes needed for public data access
 export GITHUB_TOKEN=ghp_your_token_here
 ```
+
+### VulnCheck Token — early KEV signal coverage
+
+```bash
+# Free community signup
+export VULNCHECK_API_TOKEN=your_token_here
+```
+
+This token is optional. If not configured, the tool still runs normally using CISA KEV and other sources.
 
 With a GitHub token, the tool also searches the official
 [`rapid7/metasploit-framework`](https://github.com/rapid7/metasploit-framework)
@@ -298,6 +279,8 @@ vuln-prioritize/
 │       ├── cvss_fetcher.py     # NVD  — CVSS v3.1
 │       ├── epss_fetcher.py     # FIRST — EPSS (batched)
 │       ├── kev_fetcher.py      # CISA  — KEV (cached)
+│       ├── vulncheck_kev_fetcher.py # VulnCheck KEV (early signal)
+│       ├── osv_fetcher.py      # OSV.dev fallback metadata
 │       ├── github_poc_fetcher.py  # GitHub Search — PoCs
 │       └── metasploit_fetcher.py  # ExploitDB CSV + MSF GitHub
 ├── examples/
@@ -325,7 +308,9 @@ Custom paths: `--output-json path.json --output-csv path.csv`
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
 | `CVE not found` | Too new or not yet in NVD | Wait and retry; check nvd.nist.gov |
-| EPSS always `N/A` | Very new or very old CVE | Expected — EPSS covers ~2 years of active CVEs |
+| EPSS always `N/A` | Very new or very old CVE | Expected; score still computed with completeness penalty |
+| CVSS is missing from NVD | NVD lag for new CVE | OSV fallback is attempted automatically |
+| VulnCheck KEV unavailable | Missing/invalid token | Set `VULNCHECK_API_TOKEN` in `.env` |
 | GitHub returns 403 | Unauthenticated rate limit | Add `GITHUB_TOKEN` to `.env` |
 | Countdown timer appears | API rate limit reached | Wait; tool resumes automatically |
 | Score is 0.0 | No data from any source | CVE may not exist or APIs are down |
@@ -350,7 +335,9 @@ Please report bugs and ideas via [GitHub Issues](https://github.com/stov3/vuln-p
 - [CVSS v3.1 Specification](https://www.first.org/cvss/v3.1/specification-document)
 - [EPSS Scoring](https://www.first.org/epss/)
 - [CISA KEV Catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)
+- [VulnCheck KEV](https://vulncheck.com/kev)
 - [NVD API Documentation](https://nvd.nist.gov/developers/vulnerabilities)
+- [OSV.dev API](https://google.github.io/osv.dev/api/)
 - [GitHub REST API — Rate Limits](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api)
 - [ExploitDB](https://www.exploit-db.com/)
 - [Metasploit Framework](https://github.com/rapid7/metasploit-framework)

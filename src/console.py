@@ -59,7 +59,7 @@ def severity_color(severity: str) -> str:
     """Return color code based on severity level."""
     severity_upper = severity.upper() if severity else ""
     if severity_upper == "CRITICAL":
-        return Colors.BRIGHT_RED
+        return Colors.BRIGHT_MAGENTA
     elif severity_upper == "HIGH":
         return Colors.RED
     elif severity_upper == "MEDIUM":
@@ -73,7 +73,7 @@ def severity_color(severity: str) -> str:
 def priority_color(score: float) -> str:
     """Return color based on priority score."""
     if score >= 80:
-        return Colors.BRIGHT_RED
+        return Colors.BRIGHT_MAGENTA
     elif score >= 60:
         return Colors.RED
     elif score >= 40:
@@ -155,43 +155,6 @@ def info(text: str) -> str:
     return f"{Colors.BRIGHT_BLUE}ℹ {text}{Colors.RESET}"
 
 
-def countdown_timer(seconds: int, message: str = "Waiting for rate limit reset") -> None:
-    """Display countdown timer while waiting for rate limit reset.
-    
-    Args:
-        seconds: Number of seconds to wait
-        message: Message to display
-    """
-    import time
-    
-    print(f"\n{Colors.BRIGHT_YELLOW}{message}...{Colors.RESET}")
-    print(f"{Colors.YELLOW}This ensures complete data is fetched from all sources{Colors.RESET}\n")
-    
-    for remaining in range(int(seconds), -1, -1):
-        # Calculate progress bar
-        total_secs = int(seconds)
-        progress = (total_secs - remaining) / total_secs if total_secs > 0 else 1.0
-        bar_length = 30
-        filled = int(bar_length * progress)
-        bar = "█" * filled + "░" * (bar_length - filled)
-        
-        # Format time display
-        mins, secs = divmod(remaining, 60)
-        time_str = f"{mins:02d}:{secs:02d}"
-        
-        print(
-            f"\r{Colors.BRIGHT_CYAN}[{bar}]{Colors.RESET} {Colors.BOLD}{time_str}{Colors.RESET}",
-            end="",
-            flush=True
-        )
-        
-        if remaining > 0:
-            time.sleep(1)
-    
-    print("\n")  # New line after countdown
-    print(f"{Colors.BRIGHT_GREEN}✓ Rate limit reset complete. Resuming analysis...{Colors.RESET}\n")
-
-
 def print_box(title: str, content: str = "", width: int = 80) -> None:
     """Print a formatted box with title and content."""
     print(f"{Colors.CYAN}{'=' * width}{Colors.RESET}")
@@ -255,19 +218,6 @@ def print_menu(title: str, options: List[tuple]) -> int:
             print(error("Please enter a valid number"))
 
 
-def print_progress(current: int, total: int, label: str = "") -> None:
-    """Print progress indicator."""
-    percentage = (current / total * 100) if total > 0 else 0
-    filled = int(percentage / 2)
-    bar = f"{'█' * filled}{'░' * (50 - filled)}"
-    
-    status = f"{label} " if label else ""
-    print(f"\r{status}[{bar}] {percentage:.0f}%", end="", flush=True)
-    
-    if current >= total:
-        print()  # Newline at completion
-
-
 def format_cve_table(cves: List[Dict[str, Any]]) -> None:
     """
     Format and print CVE results in an enhanced table.
@@ -283,8 +233,8 @@ def format_cve_table(cves: List[Dict[str, Any]]) -> None:
     cves_sorted = sorted(cves, key=lambda x: x.get('priority_score', 0), reverse=True)
     
     # Column definitions - adjusted widths for readability
-    columns = ["Rank", "CVE ID", "Priority", "CVSS", "Severity", "EPSS", "KEV", "PoC", "Multiplier"]
-    widths = [5, 17, 10, 7, 12, 8, 5, 5, 12]
+    columns = ["Rank", "CVE ID", "Priority", "CVSS", "Severity", "EPSS", "AV", "ExpW", "KEV", "PoC", "Multiplier"]
+    widths = [5, 17, 10, 7, 12, 8, 3, 6, 5, 5, 12]
     
     print_box(f"Vulnerability Remediation Priority ({len(cves_sorted)} CVEs)")
     print_table_header(columns, widths)
@@ -295,12 +245,23 @@ def format_cve_table(cves: List[Dict[str, Any]]) -> None:
         cvss = cve.get('cvss_score', 0)
         severity = cve.get('cvss_severity', 'UNKNOWN')[:11]
         epss = cve.get('epss_score', -1)
-        kev = "YES" if cve.get('in_kev') else "NO"
+        kev = str(cve.get('kev_status', '')).upper()
+        if kev not in {"YES", "EARLY", "NO"}:
+            if cve.get('in_kev'):
+                kev = "YES"
+            elif cve.get('in_vulncheck_kev'):
+                kev = "EARLY"
+            else:
+                kev = "NO"
+        attack_vector = str(cve.get('attack_vector', 'UNKNOWN')).upper()
+        av = attack_vector if attack_vector in {"N", "A", "L", "P"} else "?"
+        exposure_weight = cve.get('exposure_weight', 1.0)
         poc = "YES" if cve.get('github_poc_found') else "NO"
         multiplier = cve.get('exploit_multiplier', 1.0)
         
         # Format EPSS value
         epss_str = f"{epss:.2f}" if epss >= 0 else "N/A"
+        exp_weight_str = f"{float(exposure_weight):.2f}x"
         multiplier_str = f"{multiplier:.2f}x"
         
         # Apply colors
@@ -311,12 +272,14 @@ def format_cve_table(cves: List[Dict[str, Any]]) -> None:
             Colors.WHITE,  # CVSS
             severity_color(severity),  # Severity
             Colors.WHITE,  # EPSS
-            Colors.GREEN if kev == "YES" else Colors.WHITE,  # KEV
+            Colors.BRIGHT_MAGENTA if av == "N" else (Colors.BRIGHT_BLUE if av == "A" else (Colors.BRIGHT_YELLOW if av == "L" else (Colors.GREEN if av == "P" else Colors.WHITE))),  # AV
+            Colors.BRIGHT_MAGENTA if float(exposure_weight) > 1.0 else (Colors.GREEN if float(exposure_weight) < 1.0 else Colors.WHITE),  # ExpW
+            Colors.GREEN if kev == "YES" else (Colors.BRIGHT_YELLOW if kev == "EARLY" else Colors.WHITE),  # KEV
             Colors.BRIGHT_GREEN if poc == "YES" else Colors.WHITE,  # PoC
             priority_color(priority),  # Multiplier
         ]
         
-        values = [rank, cve_id, f"{priority:.1f}", f"{cvss:.1f}", severity, epss_str, kev, poc, multiplier_str]
+        values = [rank, cve_id, f"{priority:.1f}", f"{cvss:.1f}", severity, epss_str, av, exp_weight_str, kev, poc, multiplier_str]
         print_table_row(values, widths, colors)
     
     print_table_footer(sum(widths) + (len(widths) - 1) * 2)
@@ -336,6 +299,7 @@ def print_summary(cves: List[Dict[str, Any]]) -> None:
     high_count = sum(1 for cve in cves if cve.get('cvss_severity', '').upper() == 'HIGH')
     poc_count = sum(1 for cve in cves if cve.get('github_poc_found'))
     kev_count = sum(1 for cve in cves if cve.get('in_kev'))
+    early_kev_count = sum(1 for cve in cves if (not cve.get('in_kev')) and cve.get('in_vulncheck_kev'))
     
     print_box("Analysis Summary")
     print(f"  Total CVEs:          {Colors.BOLD}{len(cves)}{Colors.RESET}")
@@ -346,17 +310,7 @@ def print_summary(cves: List[Dict[str, Any]]) -> None:
     print(f"  High Severity:       {Colors.RED}{high_count}{Colors.RESET}")
     print(f"  Public PoCs:         {Colors.BRIGHT_GREEN}{poc_count}{Colors.RESET}")
     print(f"  Known Exploited:     {Colors.BRIGHT_YELLOW}{kev_count}{Colors.RESET}")
-    print()
-
-
-def print_rate_limits_enhanced(stats: Dict[str, Any]) -> None:
-    """Print enhanced rate limit statistics."""
-    print_box("Rate Limit Statistics")
-    
-    for api_name, requests_made in stats.items():
-        parts = api_name.split('_')
-        display_name = ' '.join(p.upper() for p in parts)
-        print(f"  {display_name.ljust(20)}: {Colors.BOLD}{requests_made}{Colors.RESET} requests")
+    print(f"  Early KEV Signals:   {Colors.BRIGHT_YELLOW}{early_kev_count}{Colors.RESET}")
     print()
 
 

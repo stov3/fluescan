@@ -2,9 +2,9 @@
 """
 Vulnerability Prioritization Tool - Main Entry Point
 
-This tool combines CVSS scores, EPSS predictions, Known Exploited Vulnerabilities,
-public PoCs, and Metasploit modules to provide comprehensive vulnerability
-prioritization with exploit availability analysis.
+This tool combines CVSS scores, EPSS predictions, dual KEV signals (CISA +
+VulnCheck), public PoCs, and Metasploit modules to provide comprehensive
+vulnerability prioritization with exploit availability analysis.
 
 Usage:
     python3 vuln-prioritize.py CVE-2024-1234 CVE-2024-5678
@@ -17,8 +17,8 @@ Usage:
 import argparse
 import csv
 import json
+import re
 import sys
-import time
 from pathlib import Path
 from typing import List, Dict, Any, Tuple
 
@@ -29,12 +29,15 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 from fetchers.cvss_fetcher import fetch_cvss_for_cves
 from fetchers.epss_fetcher import fetch_epss_for_cves
 from fetchers.kev_fetcher import fetch_kev_data, filter_kev_by_cves
+from fetchers.vulncheck_kev_fetcher import fetch_vulncheck_kev_data, filter_vulncheck_kev_by_cves
+from fetchers.osv_fetcher import fetch_osv_for_cves
 from fetchers.github_poc_fetcher import fetch_github_pocs
 from fetchers.metasploit_fetcher import fetch_metasploit_info, get_module_reliability
 from config import get_config
-from rate_limiter import get_max_wait_time, get_rate_limited_apis, get_apis_rate_limited_during_run
+from rate_limiter import get_apis_rate_limited_during_run
 from console import (
-    format_cve_table, print_summary, print_progress, header, success, error, warning, info, Colors, print_title, print_disclaimer_and_author, countdown_timer
+    format_cve_table, header, success, error, info, Colors,
+    print_title, print_disclaimer_and_author,
 )
 
 
@@ -53,28 +56,143 @@ def load_cves_from_file(filepath: str) -> List[str]:
     return cves
 
 
+def normalize_cve_inputs(values: List[str]) -> List[str]:
+    """Normalize CVE input tokens from CLI/file into canonical uppercase IDs.
+
+    Supports both space-separated and comma-separated formats and ignores
+    accidental trailing punctuation.
+    """
+    normalized: List[str] = []
+    pattern = re.compile(r"^CVE-\d{4}-\d{4,}$")
+
+    for raw in values:
+        if not raw:
+            continue
+        for token in raw.split(','):
+            cve = token.strip().upper().strip(';,')
+            if cve and pattern.match(cve):
+                normalized.append(cve)
+
+    return normalized
+
+
 def extract_cvss_score(cvss_data: Dict[str, Any]) -> Tuple[float, str]:
     """
-    Extract CVSS v3.1 score and severity from CVE data.
-    
+    Extract CVSS score and severity from CVE data.
+
+    Prefers v3.1, falls back to v3.0, then v2 (severity derived from score)
+    so older CVEs without v3.x metrics still get scored.
+
     Args:
         cvss_data: CVE data from NVD
-        
+
     Returns:
         Tuple of (score, severity)
     """
     if "error" in cvss_data:
         return 0.0, "UNKNOWN"
-    
+
+    metrics = cvss_data.get("metrics", {})
+
+    # CVSS v3.x (v3.1 preferred)
+    for key in ("cvssMetricV31", "cvssMetricV30"):
+        try:
+            data = metrics.get(key, [{}])[0].get("cvssData", {})
+            if data.get("baseScore") is not None:
+                return float(data["baseScore"]), data.get("baseSeverity", "UNKNOWN")
+        except (ValueError, IndexError, TypeError):
+            continue
+
+    # CVSS v2 fallback — baseSeverity lives on the metric, not cvssData
     try:
-        metrics = cvss_data.get("metrics", {})
-        cvss_v31 = metrics.get("cvssMetricV31", [{}])[0].get("cvssData", {})
-        if cvss_v31:
-            return float(cvss_v31.get("baseScore", 0)), cvss_v31.get("baseSeverity", "UNKNOWN")
+        v2 = metrics.get("cvssMetricV2", [{}])[0]
+        score = v2.get("cvssData", {}).get("baseScore")
+        if score is not None:
+            score = float(score)
+            severity = v2.get("baseSeverity") or (
+                "HIGH" if score >= 7.0 else "MEDIUM" if score >= 4.0 else "LOW"
+            )
+            return score, severity
     except (ValueError, IndexError, TypeError):
         pass
-    
+
     return 0.0, "UNKNOWN"
+
+
+def extract_attack_vector(cvss_data: Dict[str, Any]) -> str:
+    """Extract CVSS attack vector as one of N/A/L/P/UNKNOWN.
+
+    Supports CVSS v3.x (attackVector), vectorString parsing fallback, and
+    CVSS v2 (accessVector) mapped to AV-style values.
+    """
+    if "error" in cvss_data:
+        return "UNKNOWN"
+
+    metrics = cvss_data.get("metrics", {})
+
+    # CVSS v3.x first (v3.1 preferred)
+    for key in ("cvssMetricV31", "cvssMetricV30"):
+        try:
+            data = metrics.get(key, [{}])[0].get("cvssData", {})
+
+            # Primary source in NVD schema
+            attack_vector = str(data.get("attackVector", "")).strip().upper()
+            if attack_vector:
+                return {
+                    "NETWORK": "N",
+                    "ADJACENT_NETWORK": "A",
+                    "LOCAL": "L",
+                    "PHYSICAL": "P",
+                }.get(attack_vector, "UNKNOWN")
+
+            # Fallback: parse vector string
+            vector = str(data.get("vectorString", "")).upper()
+            for token in ("AV:N", "AV:A", "AV:L", "AV:P"):
+                if token in vector:
+                    return token[-1]
+        except (IndexError, TypeError, AttributeError):
+            continue
+
+    # CVSS v2 fallback: accessVector is NETWORK / ADJACENT_NETWORK / LOCAL
+    try:
+        v2 = metrics.get("cvssMetricV2", [{}])[0].get("cvssData", {})
+        access_vector = str(v2.get("accessVector", "")).strip().upper()
+        if access_vector:
+            return {
+                "NETWORK": "N",
+                "ADJACENT_NETWORK": "A",
+                "LOCAL": "L",
+            }.get(access_vector, "UNKNOWN")
+
+        vector_v2 = str(v2.get("vectorString", "")).upper()
+        for token in ("AV:N", "AV:A", "AV:L"):
+            if token in vector_v2:
+                return token[-1]
+    except (IndexError, TypeError, AttributeError):
+        pass
+
+    return "UNKNOWN"
+
+
+def attack_vector_exposure_weight(attack_vector: str) -> float:
+    """Return a soft exposure weight from CVSS AV metric.
+
+    This signal intentionally has small impact and is used as a nudge:
+    - N (Network): more internet-exposed potential
+    - A (Adjacent): somewhat externally reachable
+    - L (Local): likely more internal preconditioned
+    - P (Physical): generally harder to exploit remotely
+    """
+    av = (attack_vector or "UNKNOWN").upper()
+    if av == "N":
+        return 1.07
+    if av == "A":
+        return 1.03
+    if av == "L":
+        return 0.96
+    if av == "P":
+        return 0.90
+    return 1.00
 
 
 def extract_epss_score(epss_data: Dict[str, Any]) -> Tuple[float, float]:
@@ -101,9 +219,66 @@ def extract_epss_score(epss_data: Dict[str, Any]) -> Tuple[float, float]:
         return -1.0, -1.0
 
 
-def check_in_kev(cve_id: str, kev_results: Dict[str, Any]) -> bool:
-    """Check if CVE is in Known Exploited Vulnerabilities list."""
-    return cve_id.upper() in kev_results.get("found", {})
+def get_kev_signals(
+    cve_id: str,
+    cisa_kev_results: Dict[str, Any],
+    vulncheck_kev_results: Dict[str, Any],
+) -> Tuple[bool, bool, float]:
+    """
+    Return KEV flags and score-impact KEV strength.
+
+    Policy:
+    - CISA KEV is a confirmed exploitation signal and affects scoring strongly
+    - VulnCheck-only KEV is an early signal with reduced score impact
+    """
+    cve_upper = cve_id.upper()
+    in_cisa = cve_upper in cisa_kev_results.get("found", {})
+    in_vulncheck = cve_upper in vulncheck_kev_results.get("found", {})
+
+    if in_cisa:
+        return in_cisa, in_vulncheck, 1.0
+    if in_vulncheck:
+        return in_cisa, in_vulncheck, 0.4
+    return in_cisa, in_vulncheck, 0.0
+
+
+def apply_osv_fallback_to_cvss(
+    cve_ids: List[str],
+    cvss_results: Dict[str, Any],
+    osv_results: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Backfill missing NVD CVSS entries with OSV metadata when numeric score exists."""
+    for cve_id in cve_ids:
+        cvss_data = cvss_results.get(cve_id, {})
+        cvss_score, _ = extract_cvss_score(cvss_data)
+        if cvss_score > 0:
+            continue
+
+        osv = osv_results.get(cve_id.upper(), {})
+        if not osv.get("found"):
+            continue
+
+        osv_score = osv.get("score", -1.0)
+        if not isinstance(osv_score, (float, int)) or osv_score <= 0:
+            continue
+
+        cvss_results[cve_id] = {
+            "metrics": {
+                "cvssMetricV31": [
+                    {
+                        "cvssData": {
+                            "baseScore": float(osv_score),
+                            "baseSeverity": str(osv.get("severity", "UNKNOWN")),
+                        }
+                    }
+                ]
+            },
+            "source": "osv_fallback",
+            "osv_id": osv.get("osv_id", ""),
+            "osv_summary": osv.get("summary", ""),
+        }
+
+    return cvss_results
 
 
 def extract_github_poc_data(github_results: Dict[str, Any]) -> Dict[str, Any]:
@@ -207,156 +382,81 @@ def calculate_exploit_multiplier(
 def calculate_priority_score(
     cvss_score: float,
     epss_score: float,
-    in_kev: bool,
-    exploit_multiplier: float = 1.0
+    kev_strength: float,
+    cisa_confirmed_kev: bool,
+    attack_vector: str = "UNKNOWN",
+    github_poc_found: bool = False,
+    metasploit_found: bool = False
 ) -> float:
     """
-    Calculate vulnerability priority using Bayesian Evidence Combination.
-    
-    This implements a statistically rigorous approach based on Bayesian inference
-    and information fusion principles, combining multiple vulnerability assessment
-    sources into a single 0-100 confidence score.
-    
-    Theoretical Foundation:
-    ======================
-    • Bayesian Log-Odds: Combines evidence from independent sources (Jeffreys)
-    • Sigmoid Function: Maps combined evidence to [0,1] probability space
-    • Entropy-Weighted Fusion: Accounts for data completeness and reliability
-    • Logarithmic CVSS Transform: Models human risk perception (Weber-Fechner)
-    • Confidence Weighting: Each source weighted by reliability/expertise level
-    
-    Sources and Reliability:
-    • CVSS v3.1 (0-10): Authoritatively assessed severity [reliability: 0.90]
-    • EPSS (0-1): Statistically modeled exploitation probability [reliability: 0.75]
-    • KEV (binary): Active threat monitoring from CISA [reliability: 0.95]
-    • Exploit Proof (1.0-1.75): Real-world validation [reliability: 0.85]
+    Calculate vulnerability priority using a weighted risk blend.
+
+    The score is intentionally simple and auditable:
+    - Normalize each signal to [0, 1]
+    - Blend with fixed weights
+    - Apply a data completeness factor
+    - Enforce a KEV-based critical floor when active exploitation is confirmed
     
     Args:
         cvss_score: CVSS v3.1 base score (0-10)
         epss_score: EPSS score (0-1) or -1 if not available
-        in_kev: Whether CVE is in Known Exploited Vulnerabilities (boolean)
-        exploit_multiplier: Multiplier based on exploit availability (1.0-1.75)
+        kev_strength: KEV score-impact signal in [0,1] (CISA=1.0, VulnCheck-only=0.4)
+        cisa_confirmed_kev: True only when CISA KEV confirms active exploitation
+        attack_vector: CVSS attack vector (N/A/L/P/UNKNOWN)
+        github_poc_found: Whether a public GitHub PoC was found
+        metasploit_found: Whether a Metasploit module was found
         
     Returns:
-        Priority score (0-100) with Bayesian confidence interpretation
+        Priority score (0-100)
     """
-    import math
-    
-    # ===== STEP 1: Normalize inputs to probability space [0, 1] =====
-    
-    # CVSS: Apply logarithmic transformation
-    # Human perception of risk follows Weber-Fechner law (logarithmic)
-    # Higher CVSS values show diminishing returns in perceived risk increase
-    cvss_normalized = math.log1p(cvss_score) / math.log1p(10.0)  # log(1+x)/log(11)
-    cvss_prob = min(cvss_normalized, 1.0)
-    
-    # EPSS: Already in probability space [0, 1]
-    epss_prob = min(max(epss_score, 0.0), 1.0) if epss_score >= 0 else -1.0
-    
-    # KEV: Binary indicator of known active exploitation
-    kev_present = 1.0 if in_kev else 0.0
-    
-    # Exploit proof: Map multiplier [1.0, 1.75] to confidence [0, 1]
-    exploit_proof = (exploit_multiplier - 1.0) / 0.75  # Normalize 1.0→0, 1.75→1.0
-    
-    # ===== STEP 2: Bayesian Log-Odds Combination =====
-    # Combine independent evidence sources using Jeffreys' log-odds method
-    
-    def log_odds(probability, epsilon=1e-4):
-        """Convert probability to log-odds for Bayesian combination."""
-        p = max(min(probability, 1.0 - epsilon), epsilon)
-        return math.log(p / (1.0 - p))
-    
-    # Source reliability weights (epistemic confidence in each assessment)
-    # These reflect how trustworthy each data source is
-    weights = {
-        'cvss': 0.30,      # 30%: authoritative but not exploit-specific
-        'epss': 0.35,      # 35%: highest relevance (actual exploit probability)
-        'kev': 0.25,       # 25%: strong evidence but lagging indicator
-        'exploit': 0.10,   # 10%: direct proof but rare in our dataset
-    }
-    
-    # Accumulate weighted log-odds (Bayesian evidence combination)
-    total_log_odds = 0.0
-    
-    # CVSS evidence: severity contributes to risk
-    if cvss_score > 0:
-        cvss_log_odds = log_odds(cvss_prob)
-        total_log_odds += weights['cvss'] * cvss_log_odds
+    # Normalize to [0, 1]
+    cvss_norm = min(max(cvss_score / 10.0, 0.0), 1.0) if cvss_score > 0 else 0.0
+    epss_norm = min(max(epss_score, 0.0), 1.0) if epss_score >= 0 else 0.0
+    kev_norm = min(max(kev_strength, 0.0), 1.0)
+
+    # Exploit signal strength:
+    # - 0.0: no exploit signal
+    # - 0.5: GitHub PoC only
+    # - 1.0: Metasploit present (with or without PoC)
+    if metasploit_found:
+        exploit_norm = 1.0
+    elif github_poc_found:
+        exploit_norm = 0.5
     else:
-        # Default low risk if CVSS unavailable
-        total_log_odds += weights['cvss'] * log_odds(0.1)
-    
-    # EPSS evidence: most direct exploitability measure (highest weight)
-    if epss_prob >= 0:
-        epss_log_odds = log_odds(epss_prob)
-        total_log_odds += weights['epss'] * epss_log_odds
-    else:
-        # EPSS unavailable: estimate from CVSS (weaker signal)
-        # Assume higher severity → higher exploitation probability
-        estimated_epss = min(cvss_prob * 0.6, 0.7)
-        total_log_odds += weights['epss'] * log_odds(estimated_epss) * 0.70  # Reduce by 30% due to uncertainty
-    
-    # KEV evidence: strong empirical signal of active exploitation
-    if kev_present > 0.5:
-        # Known exploited: strong increase in risk posterior
-        total_log_odds += weights['kev'] * log_odds(0.90)
-    else:
-        # Not yet known: slight decrease in confidence
-        total_log_odds += weights['kev'] * log_odds(0.35)
-    
-    # Exploit proof evidence: real-world validation
-    if exploit_proof > 0.1:
-        exploit_posterior = 0.50 + (exploit_proof * 0.40)  # Maps [0,1] to [0.5, 0.9]
-        total_log_odds += weights['exploit'] * log_odds(exploit_posterior)
-    
-    # ===== STEP 3: Convert Log-Odds to Probability (Sigmoid/Logistic) =====
-    # Use logistic sigmoid: P = 1 / (1 + e^(-log_odds))
-    # This provides natural non-linear mapping with smooth saturation at boundaries
-    
-    try:
-        # Clamp log_odds to prevent numerical overflow in exp()
-        clamped_log_odds = max(min(total_log_odds, 12.0), -12.0)
-        posterior_probability = 1.0 / (1.0 + math.exp(-clamped_log_odds))
-    except (OverflowError, ValueError):
-        posterior_probability = 0.5  # Fallback to neutral if calculation fails
-    
-    # ===== STEP 4: Apply Entropy Discount for Missing Data =====
-    # Reduce confidence when critical data sources are unavailable
-    # This penalizes incomplete assessments appropriately
-    
-    data_available = 0.0
-    data_available += 1.0 if cvss_score > 0 else 0.25
-    data_available += 1.0 if epss_prob >= 0 else 0.50
-    data_available += 1.0 if kev_present > 0.5 else 0.50
-    data_available += 1.0 if exploit_proof > 0.1 else 0.30
-    
-    data_completeness = data_available / 4.0  # Normalize to [0, 1]
-    
-    # Entropy discount: 5-15% reduction for incomplete data
-    entropy_discount = 0.90 + (0.10 * data_completeness)
-    adjusted_probability = posterior_probability * entropy_discount
-    
-    # ===== STEP 5: Scale to 0-100 and Apply Final Adjustments =====
-    
-    priority_score = adjusted_probability * 100.0
-    
-    # Apply mild non-linearity for better risk distribution
-    # Low scores (0-30) are slightly compressed → less spread for low-risk vulns
-    # High scores (70-100) are slightly expanded → more spread for high-risk vulns
-    if priority_score < 30:
-        priority_score = priority_score ** 1.05
-    elif priority_score > 70:
-        priority_score = 70.0 + ((priority_score - 70.0) ** 0.95)
-    
-    # Final bounds
+        exploit_norm = 0.0
+
+    # Weighted linear blend
+    raw_score = (
+        (0.30 * cvss_norm)
+        + (0.40 * epss_norm)
+        + (0.20 * kev_norm)
+        + (0.10 * exploit_norm)
+    )
+
+    # Completeness factor penalizes missing CVSS/EPSS while keeping binary KEV/exploit signals transparent.
+    # KEV and exploit availability are always evaluated as explicit yes/no signals.
+    data_sources_found = 0
+    data_sources_found += 1 if cvss_score > 0 else 0
+    data_sources_found += 1 if epss_score >= 0 else 0
+    data_sources_found += 1
+    data_sources_found += 1
+    completeness_factor = data_sources_found / 4.0
+
+    exposure_weight = attack_vector_exposure_weight(attack_vector)
+    priority_score = raw_score * 100.0 * completeness_factor * exposure_weight
+
+    # Active in-the-wild exploitation should never be ranked below critical.
+    if cisa_confirmed_kev:
+        priority_score = max(priority_score, 85.0)
+
     return min(max(priority_score, 0.0), 100.0)
 
 
 def generate_report(
     cvss_results: Dict[str, Any],
     epss_results: Dict[str, Any],
-    kev_results: Dict[str, Any],
+    cisa_kev_results: Dict[str, Any],
+    vulncheck_kev_results: Dict[str, Any],
     github_results: Dict[str, Any],
     msf_results: Dict[str, Any],
     cve_ids: List[str]
@@ -369,7 +469,8 @@ def generate_report(
     Args:
         cvss_results: Results from CVSS fetcher
         epss_results: Results from EPSS fetcher
-        kev_results: Results from KEV fetcher
+        cisa_kev_results: Results from CISA KEV fetcher
+        vulncheck_kev_results: Results from VulnCheck KEV fetcher
         github_results: Results from GitHub PoC fetcher
         msf_results: Results from Metasploit fetcher
         cve_ids: List of requested CVE IDs
@@ -387,8 +488,14 @@ def generate_report(
         epss_data = epss_results.get(cve_upper, {})
         
         cvss_score, cvss_severity = extract_cvss_score(cvss_data)
+        attack_vector = extract_attack_vector(cvss_data)
         epss_score, epss_percentile = extract_epss_score(epss_data)
-        in_kev = check_in_kev(cve_id, kev_results)
+        in_cisa_kev, in_vulncheck_kev, kev_strength = get_kev_signals(
+            cve_id,
+            cisa_kev_results,
+            vulncheck_kev_results,
+        )
+        kev_status = "YES" if in_cisa_kev else ("EARLY" if in_vulncheck_kev else "NO")
         
         # Extract exploit data
         github_data = extract_github_poc_data(github_results.get(cve_id, {}))
@@ -398,7 +505,15 @@ def generate_report(
         exploit_multiplier = calculate_exploit_multiplier(github_data, msf_data)
         
         # Calculate priority with exploit information
-        priority_score = calculate_priority_score(cvss_score, epss_score, in_kev, exploit_multiplier)
+        priority_score = calculate_priority_score(
+            cvss_score,
+            epss_score,
+            kev_strength,
+            in_cisa_kev,
+            attack_vector,
+            github_data.get("found", False),
+            msf_data.get("found", False),
+        )
         
         # Build record with comprehensive data
         record = {
@@ -406,16 +521,25 @@ def generate_report(
             "priority_score": round(priority_score, 2),
             "cvss_score": cvss_score,
             "cvss_severity": cvss_severity,
+            "attack_vector": attack_vector,
+            "exposure_weight": round(attack_vector_exposure_weight(attack_vector), 3),
             "epss_score": round(epss_score, 4),
             "epss_percentile": round(epss_percentile, 2),
-            "in_kev": in_kev,
+            "epss_prev_7d": round(float(epss_data.get("epss_prev_7d", -1)), 4) if epss_data.get("epss_prev_7d") is not None else -1,
+            "epss_delta_7d": round(float(epss_data.get("epss_delta_7d", 0)), 4) if epss_data.get("epss_delta_7d") is not None else 0,
+            "in_kev": in_cisa_kev,
+            "in_vulncheck_kev": in_vulncheck_kev,
+            "kev_status": kev_status,
+            "kev_signal_strength": kev_strength,
             "github_poc_found": github_data.get("found", False),
             "github_poc_count": github_data.get("count", 0),
             "metasploit_found": msf_data.get("found", False),
             "metasploit_reliability": msf_data.get("reliability"),
             "exploit_multiplier": round(exploit_multiplier, 2),
+            "cvss_source": cvss_data.get("source", "nvd"),
             "cvss_error": cvss_data.get("error"),
             "epss_error": epss_data.get("error"),
+            "vulncheck_error": vulncheck_kev_results.get("error"),
             "github_error": github_data.get("error"),
             "metasploit_error": msf_data.get("error"),
         }
@@ -438,12 +562,13 @@ def write_json_report(filepath: str, report: List[Dict[str, Any]]) -> None:
 def write_csv_report(filepath: str, report: List[Dict[str, Any]]) -> None:
     """Write report to CSV file with all fields including exploit data."""
     fieldnames = [
-        "cve_id", "priority_score", "cvss_score", "cvss_severity",
-        "epss_score", "epss_percentile", "in_kev",
+        "cve_id", "priority_score", "cvss_score", "cvss_severity", "attack_vector", "exposure_weight",
+        "epss_score", "epss_percentile", "epss_prev_7d", "epss_delta_7d",
+        "in_kev", "in_vulncheck_kev", "kev_status", "kev_signal_strength",
         "github_poc_found", "github_poc_count",
         "metasploit_found", "metasploit_reliability",
-        "exploit_multiplier",
-        "cvss_error", "epss_error", "github_error", "metasploit_error"
+        "exploit_multiplier", "cvss_source",
+        "cvss_error", "epss_error", "vulncheck_error", "github_error", "metasploit_error"
     ]
     
     with open(filepath, 'w', newline='') as f:
@@ -454,12 +579,8 @@ def write_csv_report(filepath: str, report: List[Dict[str, Any]]) -> None:
 
 
 def print_table_report(report: List[Dict[str, Any]]) -> None:
-    """Print an enhanced formatted table report to console with exploit data."""
-    # Use the new enhanced console formatter
+    """Print formatted table report to console."""
     format_cve_table(report)
-    
-    # Print summary statistics
-    print_summary(report)
 
 
 def parse_args():
@@ -515,11 +636,11 @@ def main():
     print_disclaimer_and_author()
     
     # Collect CVE IDs
-    cve_ids = list(args.cves) if args.cves else []
+    cve_ids = normalize_cve_inputs(list(args.cves) if args.cves else [])
     
     if args.cves_file:
         try:
-            file_cves = load_cves_from_file(args.cves_file)
+            file_cves = normalize_cve_inputs(load_cves_from_file(args.cves_file))
             cve_ids.extend(file_cves)
         except FileNotFoundError:
             print(error(f"CVE file not found: {args.cves_file}"), file=sys.stderr)
@@ -564,9 +685,25 @@ def main():
         print("Fetching EPSS data...")
         epss_results = fetch_epss_for_cves(cve_ids)
         
-        print("Fetching KEV data...")
-        kev_data = fetch_kev_data()
-        kev_results = filter_kev_by_cves(kev_data, cve_ids)
+        print("Fetching CISA KEV data...")
+        cisa_kev_data = fetch_kev_data()
+        cisa_kev_results = filter_kev_by_cves(cisa_kev_data, cve_ids)
+
+        print("Fetching VulnCheck KEV data (early signal)...")
+        vulncheck_kev_data = fetch_vulncheck_kev_data()
+        vulncheck_kev_results = filter_vulncheck_kev_by_cves(vulncheck_kev_data, cve_ids)
+
+        # OSV fallback: fill missing NVD CVSS values when OSV provides a numeric score.
+        missing_cvss_ids = []
+        for cve_id in cve_ids:
+            cvss_score, _ = extract_cvss_score(cvss_results.get(cve_id, {}))
+            if cvss_score <= 0:
+                missing_cvss_ids.append(cve_id)
+
+        if missing_cvss_ids:
+            print(f"Fetching OSV fallback metadata for {len(missing_cvss_ids)} CVE(s)...")
+            osv_results = fetch_osv_for_cves(missing_cvss_ids)
+            cvss_results = apply_osv_fallback_to_cvss(missing_cvss_ids, cvss_results, osv_results)
         
         print("Searching for GitHub PoCs...")
         github_results = fetch_github_pocs(cve_ids)
@@ -574,103 +711,25 @@ def main():
         print("Checking Metasploit modules...")
         msf_results = fetch_metasploit_info(cve_ids)
         
-        # Check if any APIs exceeded their rate limit during fetching
+        # Report any APIs that hit their rate limit during fetching
         # (acquire() automatically blocks and waits when limit is reached)
         rate_limited_apis = get_apis_rate_limited_during_run()
-        
-        # Also check APIs that show high usage (>100% = they hit the limit)
-        import rate_limiter as rl_module  # Use the same import path as fetchers
-        _manager = rl_module._manager
-        high_usage_apis = []
-        for limiter in _manager.limiters.values():
-            _, usage_pct = limiter.get_stats()
-            if usage_pct > 100:
-                high_usage_apis.append(limiter.api_name.upper())
-        
-        # Show message if any APIs were stressed
-        all_rate_limited = list(set(rate_limited_apis + high_usage_apis))
-        if all_rate_limited:
-            api_names = ", ".join(sorted(all_rate_limited))
+        if rate_limited_apis:
+            api_names = ", ".join(sorted(set(rate_limited_apis)))
             print(f"\n{Colors.BRIGHT_YELLOW}✓ Rate limits encountered for {api_names}{Colors.RESET}")
-            print(f"{Colors.DIM}  Tool automatically throttled and waited for reset(s).{Colors.RESET}")
-            print(f"{Colors.DIM}  All data fetched successfully with no data loss.{Colors.RESET}\n")
-        
-        # Process and display results incrementally
+            print(f"{Colors.DIM}  Tool automatically throttled and waited for reset(s). No data loss.{Colors.RESET}\n")
+
+        # All data is local now — scoring is instant
         print(f"{Colors.BOLD}Processing vulnerabilities...{Colors.RESET}\n")
-        
-        report = []
-        start_time = time.time()
-        
-        for idx, cve_id in enumerate(cve_ids, 1):
-            # Calculate estimated time remaining
-            elapsed = time.time() - start_time
-            avg_time_per_cve = elapsed / idx if idx > 0 else 0.1
-            remaining_cves = len(cve_ids) - idx
-            estimated_remaining = avg_time_per_cve * remaining_cves
-            
-            # Extract and process single CVE
-            cve_upper = cve_id.upper()
-            cvss_data = cvss_results.get(cve_id, {})
-            epss_data = epss_results.get(cve_upper, {})
-            
-            cvss_score, cvss_severity = extract_cvss_score(cvss_data)
-            epss_score, epss_percentile = extract_epss_score(epss_data)
-            in_kev = check_in_kev(cve_id, kev_results)
-            
-            github_data = extract_github_poc_data(github_results.get(cve_id, {}))
-            msf_data = extract_metasploit_data(msf_results.get(cve_id, {}))
-            
-            exploit_multiplier = calculate_exploit_multiplier(github_data, msf_data)
-            priority_score = calculate_priority_score(cvss_score, epss_score, in_kev, exploit_multiplier)
-            
-            record = {
-                "cve_id": cve_upper,
-                "priority_score": round(priority_score, 2),
-                "cvss_score": cvss_score,
-                "cvss_severity": cvss_severity,
-                "epss_score": round(epss_score, 4),
-                "epss_percentile": round(epss_percentile, 2),
-                "in_kev": in_kev,
-                "github_poc_found": github_data.get("found", False),
-                "github_poc_count": github_data.get("count", 0),
-                "metasploit_found": msf_data.get("found", False),
-                "metasploit_reliability": msf_data.get("reliability"),
-                "exploit_multiplier": round(exploit_multiplier, 2),
-                "cvss_error": cvss_data.get("error"),
-                "epss_error": epss_data.get("error"),
-                "github_error": github_data.get("error"),
-                "metasploit_error": msf_data.get("error"),
-            }
-            
-            report.append(record)
-            
-            # Build in-place progress line (overwrite with \r, no newline)
-            bar_width = 20
-            filled = int((idx / len(cve_ids)) * bar_width)
-            bar = "█" * filled + "░" * (bar_width - filled)
-            eta_str = ""
-            if estimated_remaining > 0 and idx < len(cve_ids):
-                mins, secs = divmod(int(estimated_remaining), 60)
-                eta_str = f" | ETA {mins:02d}:{secs:02d}"
-            
-            line = (f"  [{bar}] {idx}/{len(cve_ids)} "
-                    f"{cve_upper} — score: {priority_score:.1f}{eta_str}")
-            # Pad to overwrite any longer previous line
-            line = line.ljust(78)
-            
-            if idx < len(cve_ids):
-                # Overwrite same line
-                sys.stdout.write(f"\r{line}")
-                sys.stdout.flush()
-            else:
-                # Last CVE — end with newline so the line stays visible
-                sys.stdout.write(f"\r{line}\n")
-                sys.stdout.flush()
-        
-        # Sort by priority score
-        report.sort(key=lambda x: x["priority_score"], reverse=True)
-        
-        print(f"\n{Colors.BOLD}Generating reports...{Colors.RESET}\n")
+
+        report = generate_report(
+            cvss_results, epss_results,
+            cisa_kev_results, vulncheck_kev_results,
+            github_results, msf_results,
+            cve_ids,
+        )
+
+        print(f"{Colors.BOLD}Generating reports...{Colors.RESET}\n")
         
         # Write outputs
         write_json_report(args.output_json, report)
@@ -682,9 +741,7 @@ def main():
         
         # Print completion message
         if report:
-            top_cve = report[0]
             print(success(f"Analysis complete! {len(report)} CVE(s) prioritized"))
-            print(info(f"Top priority: {Colors.BOLD}{top_cve['cve_id']}{Colors.RESET} (score: {Colors.BOLD}{top_cve['priority_score']:.1f}{Colors.RESET})"))
         
         return 0
     
