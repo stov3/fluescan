@@ -1,7 +1,9 @@
-# fluescan
+## Fluescan
 
+**Fluescan** *(noun)* /ˈfluː.skæn/
 
-A command-line tool that combines multiple public data sources into a single **0–100 priority score** per CVE, so you know which vulnerabilities to patch first.
+> A tool for surfacing risks that quietly accumulate until they ignite — named after the *flue*, the chimney passage where dangerous buildup collects unnoticed until it flashes over.
+
 
 [![Python 3.7+](https://img.shields.io/badge/python-3.7%2B-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
