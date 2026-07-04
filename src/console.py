@@ -33,6 +33,10 @@ class Colors:
     BRIGHT_MAGENTA = '\033[95m'
     BRIGHT_CYAN = '\033[96m'
     BRIGHT_WHITE = '\033[97m'
+    ORANGE = '\033[38;5;208m'
+    BRIGHT_ORANGE = '\033[38;5;214m'
+    SMOKE = '\033[38;5;250m'
+    DARK_SMOKE = '\033[38;5;244m'
     
     # Background
     BG_RED = '\033[41m'
@@ -85,54 +89,63 @@ def priority_color(score: float) -> str:
 
 
 def print_title() -> None:
-    """Display title banner for the application."""
+    """Display title banner (pyfiglet text only, no logo art)."""
     if HAS_PYFIGLET:
         try:
             fig = Figlet(font='slant', width=100)
             title_text = fig.renderText('fluescan')
-            print(f"{Colors.BRIGHT_CYAN}{title_text}{Colors.RESET}")
-        except:
-            # Fallback if pyfiglet fails
+            title_lines = title_text.splitlines()
+            for i, line in enumerate(title_lines):
+                if i < max(1, len(title_lines) // 3):
+                    color = Colors.BRIGHT_YELLOW
+                elif i < max(2, (2 * len(title_lines)) // 3):
+                    color = Colors.BRIGHT_ORANGE
+                else:
+                    color = Colors.ORANGE
+                print(f"{color}{line}{Colors.RESET}")
+        except Exception:
             print_title_fallback()
     else:
         print_title_fallback()
+
+    print(f"{Colors.DARK_SMOKE}{'=' * 36}{Colors.RESET}")
     print()
 
 
 def print_title_fallback() -> None:
     """Fallback title if pyfiglet unavailable."""
-    print(f"{Colors.BRIGHT_CYAN}fluescan{Colors.RESET}\n")
+    print(f"{Colors.BRIGHT_ORANGE}{Colors.BOLD}fluescan{Colors.RESET}\n")
 
 
 def print_disclaimer_and_author() -> None:
     """Display disclaimer and author information."""
     disclaimer = f"""
 {Colors.BRIGHT_YELLOW}⚠ DISCLAIMER{Colors.RESET}
-{Colors.DIM}This tool provides vulnerability prioritization guidance based on multiple data
+{Colors.SMOKE}This tool provides vulnerability prioritization guidance based on multiple data
 sources (CVSS, EPSS, KEV, PoCs, Metasploit). While efforts are made to
 ensure accuracy, the results should be verified independently. This tool is
 provided AS-IS without warranty. Always perform thorough security assessments
 before making remediation decisions.{Colors.RESET}
 
-{Colors.BRIGHT_GREEN}📖 OPEN SOURCE{Colors.RESET}
-{Colors.DIM}This project is open-source and community-driven. Contributions, bug reports,
+{Colors.BRIGHT_ORANGE}📖 OPEN SOURCE{Colors.RESET}
+{Colors.SMOKE}This project is open-source and community-driven. Contributions, bug reports,
 and feature requests are welcome! Visit the GitHub repository for more information.{Colors.RESET}
 
-{Colors.BRIGHT_CYAN}👤 Author{Colors.RESET}
-{Colors.DIM}Created by: {Colors.BRIGHT_CYAN}https://github.com/stov3{Colors.RESET}
-{Colors.DIM}Repository:  {Colors.BRIGHT_CYAN}https://github.com/stov3/fluescan{Colors.RESET}
+{Colors.BRIGHT_ORANGE}👤 Author{Colors.RESET}
+{Colors.SMOKE}Created by: {Colors.BRIGHT_WHITE}https://github.com/stov3{Colors.RESET}
+{Colors.SMOKE}Repository:  {Colors.BRIGHT_WHITE}https://github.com/stov3/fluescan{Colors.RESET}
 """
     print(disclaimer)
 
 
 def header(text: str) -> str:
     """Format header text."""
-    return f"{Colors.BOLD}{Colors.CYAN}{text}{Colors.RESET}"
+    return f"{Colors.BOLD}{Colors.BRIGHT_ORANGE}{text}{Colors.RESET}"
 
 
 def subheader(text: str) -> str:
     """Format subheader text."""
-    return f"{Colors.BRIGHT_CYAN}{text}{Colors.RESET}"
+    return f"{Colors.SMOKE}{text}{Colors.RESET}"
 
 
 def success(text: str) -> str:
@@ -152,14 +165,14 @@ def warning(text: str) -> str:
 
 def info(text: str) -> str:
     """Format info message."""
-    return f"{Colors.BRIGHT_BLUE}ℹ {text}{Colors.RESET}"
+    return f"{Colors.ORANGE}ℹ {text}{Colors.RESET}"
 
 
 def print_box(title: str, content: str = "", width: int = 80) -> None:
     """Print a formatted box with title and content."""
-    print(f"{Colors.CYAN}{'=' * width}{Colors.RESET}")
-    print(f"{Colors.BOLD}{Colors.CYAN}{title.center(width)}{Colors.RESET}")
-    print(f"{Colors.CYAN}{'=' * width}{Colors.RESET}")
+    print(f"{Colors.DARK_SMOKE}{'=' * width}{Colors.RESET}")
+    print(f"{Colors.BOLD}{Colors.BRIGHT_ORANGE}{title.center(width)}{Colors.RESET}")
+    print(f"{Colors.DARK_SMOKE}{'=' * width}{Colors.RESET}")
     if content:
         print(content)
     print()
@@ -171,9 +184,9 @@ def print_table_header(columns: List[str], widths: List[int]) -> None:
     for col, width in zip(columns, widths):
         header_row += f"{Colors.BOLD}{col.ljust(width)}{Colors.RESET}  "
     
-    print(f"{Colors.CYAN}{'=' * sum(widths)}{Colors.RESET}")
+    print(f"{Colors.DARK_SMOKE}{'=' * sum(widths)}{Colors.RESET}")
     print(header_row)
-    print(f"{Colors.CYAN}{'=' * sum(widths)}{Colors.RESET}")
+    print(f"{Colors.DARK_SMOKE}{'=' * sum(widths)}{Colors.RESET}")
 
 
 def print_table_row(values: List[Any], widths: List[int], colors_list: List[str] = None) -> None:
@@ -187,7 +200,7 @@ def print_table_row(values: List[Any], widths: List[int], colors_list: List[str]
 
 def print_table_footer(width: int) -> None:
     """Print table footer."""
-    print(f"{Colors.CYAN}{'=' * width}{Colors.RESET}\n")
+    print(f"{Colors.DARK_SMOKE}{'=' * width}{Colors.RESET}\n")
 
 
 def print_menu(title: str, options: List[tuple]) -> int:
