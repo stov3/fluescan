@@ -89,7 +89,7 @@ def print_title() -> None:
     if HAS_PYFIGLET:
         try:
             fig = Figlet(font='slant', width=100)
-            title_text = fig.renderText('vuln-prioritize')
+            title_text = fig.renderText('fluescan')
             print(f"{Colors.BRIGHT_CYAN}{title_text}{Colors.RESET}")
         except:
             # Fallback if pyfiglet fails
@@ -101,7 +101,7 @@ def print_title() -> None:
 
 def print_title_fallback() -> None:
     """Fallback title if pyfiglet unavailable."""
-    print(f"{Colors.BRIGHT_CYAN}vuln-prioritize{Colors.RESET}\n")
+    print(f"{Colors.BRIGHT_CYAN}fluescan{Colors.RESET}\n")
 
 
 def print_disclaimer_and_author() -> None:
@@ -120,7 +120,7 @@ and feature requests are welcome! Visit the GitHub repository for more informati
 
 {Colors.BRIGHT_CYAN}👤 Author{Colors.RESET}
 {Colors.DIM}Created by: {Colors.BRIGHT_CYAN}https://github.com/stov3{Colors.RESET}
-{Colors.DIM}Repository:  {Colors.BRIGHT_CYAN}https://github.com/stov3/vuln-prioritize{Colors.RESET}
+{Colors.DIM}Repository:  {Colors.BRIGHT_CYAN}https://github.com/stov3/fluescan{Colors.RESET}
 """
     print(disclaimer)
 
@@ -321,7 +321,7 @@ def interactive_menu() -> tuple:
     Returns:
         Tuple of (cves, output_json, output_csv, cves_file, no_table)
     """
-    print_box("Welcome to vuln-prioritize", "Vulnerability Prioritization Tool")
+    print_box("Welcome to fluescan", "Vulnerability Prioritization Tool")
     
     options = [
         (1, "Analyze specific CVE IDs"),
@@ -382,10 +382,10 @@ def interactive_menu() -> tuple:
         
         json_choice = input(f"{Colors.BOLD}Export JSON report? (y/n) [{Colors.DIM}n{Colors.RESET}{Colors.BOLD}]: {Colors.RESET}").strip().lower()
         if json_choice == 'y':
-            output_json = "vulnerability_report.json"
+            output_json = "fluescan_report.json"
         
         csv_choice = input(f"{Colors.BOLD}Export CSV report? (y/n) [{Colors.DIM}n{Colors.RESET}{Colors.BOLD}]: {Colors.RESET}").strip().lower()
         if csv_choice == 'y':
-            output_csv = "vulnerability_report.csv"
+            output_csv = "fluescan_report.csv"
     
     return (cves, output_json, output_csv, None, False)

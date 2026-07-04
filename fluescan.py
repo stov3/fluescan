@@ -7,11 +7,11 @@ VulnCheck), public PoCs, and Metasploit modules to provide comprehensive
 vulnerability prioritization with exploit availability analysis.
 
 Usage:
-    python3 vuln-prioritize.py CVE-2024-1234 CVE-2024-5678
-    python3 vuln-prioritize.py --cves-file cves.txt
-    python3 vuln-prioritize.py CVE-2024-1234 --output-json report.json
-    python3 vuln-prioritize.py --check-apis
-    python3 vuln-prioritize.py --setup
+    python3 fluescan.py CVE-2024-1234 CVE-2024-5678
+    python3 fluescan.py --cves-file cves.txt
+    python3 fluescan.py CVE-2024-1234 --output-json report.json
+    python3 fluescan.py --check-apis
+    python3 fluescan.py --setup
 """
 
 import argparse
@@ -590,26 +590,26 @@ def parse_args():
         epilog="""
 Examples:
   # With individual CVE IDs
-  python3 vuln-prioritize.py CVE-2024-1234 CVE-2024-5678
+  python3 fluescan.py CVE-2024-1234 CVE-2024-5678
   
   # With CVE list from file
-  python3 vuln-prioritize.py --cves-file cves.txt
+  python3 fluescan.py --cves-file cves.txt
   
   # With custom output paths
-  python3 vuln-prioritize.py CVE-2024-1234 --output-json report.json --output-csv report.csv
+  python3 fluescan.py CVE-2024-1234 --output-json report.json --output-csv report.csv
   
   # Suppress console table
-  python3 vuln-prioritize.py --cves-file cves.txt --no-table
+  python3 fluescan.py --cves-file cves.txt --no-table
   
   # Set up API keys
-  python3 vuln-prioritize.py --setup
+  python3 fluescan.py --setup
         """
     )
     
     parser.add_argument("cves", nargs="*", help="CVE IDs to analyze")
     parser.add_argument("--cves-file", help="File containing CVE IDs (one per line)")
-    parser.add_argument("--output-json", default="vulnerability_report.json", help="JSON output file")
-    parser.add_argument("--output-csv", default="vulnerability_report.csv", help="CSV output file")
+    parser.add_argument("--output-json", default="fluescan_report.json", help="JSON output file")
+    parser.add_argument("--output-csv", default="fluescan_report.csv", help="CSV output file")
     parser.add_argument("--no-table", action="store_true", help="Don't print table report to console")
     parser.add_argument("--setup", action="store_true", help="Configure API keys (interactive)")
     parser.add_argument("--check-apis", action="store_true", help="Check API connectivity")

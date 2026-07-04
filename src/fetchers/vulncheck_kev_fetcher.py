@@ -97,7 +97,7 @@ def fetch_vulncheck_kev_data() -> Dict[str, Any]:
     limiter.acquire("vulncheck_kev")
 
     headers = {
-        "User-Agent": "vuln-prioritize/1.0",
+        "User-Agent": "fluescan/1.0",
         "Accept": "application/json",
         "Authorization": f"Bearer {token}",
         "X-API-Key": token,

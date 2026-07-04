@@ -74,7 +74,7 @@ def _get_exploitdb_index():
         return _EXPLOITDB_INDEX
 
     disk_cache = _load_exploitdb_cache()
-    headers = {"User-Agent": "vuln-prioritize/1.0"}
+    headers = {"User-Agent": "fluescan/1.0"}
     if disk_cache.get("last_modified"):
         headers["If-Modified-Since"] = disk_cache["last_modified"]
     if disk_cache.get("etag"):
@@ -155,7 +155,7 @@ def _search_msf_github(cve_id, token):
     )
     url = f"https://api.github.com/search/code?q={query}&per_page=10"
     req = urllib.request.Request(url, headers={
-        "User-Agent":           "vuln-prioritize/1.0",
+        "User-Agent":           "fluescan/1.0",
         "Accept":               GITHUB_ACCEPT,
         "X-GitHub-Api-Version": GITHUB_API_VER,
         "Authorization":        f"Bearer {token}",

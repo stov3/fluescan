@@ -1,4 +1,4 @@
-# vuln-prioritize
+# fluescan
 
 
 A command-line tool that combines multiple public data sources into a single **0–100 priority score** per CVE, so you know which vulnerabilities to patch first.
@@ -30,8 +30,8 @@ Scores are combined using a weighted risk blend with KEV signal weighting and a 
 ## Installation
 
 ```bash
-git clone https://github.com/stov3/vuln-prioritize.git
-cd vuln-prioritize
+git clone https://github.com/stov3/fluescan.git
+cd fluescan
 pip install -r requirements.txt
 ```
 
@@ -44,31 +44,31 @@ pip install -r requirements.txt
 
 ```bash
 # Single CVE
-python3 vuln-prioritize.py CVE-2024-1234
+python3 fluescan.py CVE-2024-1234
 
 # Multiple CVEs — sorted by priority, highest risk first
-python3 vuln-prioritize.py CVE-2024-1234 CVE-2023-44487 CVE-2022-0847
+python3 fluescan.py CVE-2024-1234 CVE-2023-44487 CVE-2022-0847
 
 # Multiple CVEs (comma-separated also supported)
-python3 vuln-prioritize.py CVE-2024-1234, CVE-2023-44487, CVE-2022-0847
+python3 fluescan.py CVE-2024-1234, CVE-2023-44487, CVE-2022-0847
 
 # From a file (one CVE per line, # = comment)
-python3 vuln-prioritize.py --cves-file examples/sample_cves.txt
+python3 fluescan.py --cves-file examples/sample_cves.txt
 
 # Export reports
-python3 vuln-prioritize.py --cves-file my_cves.txt \
+python3 fluescan.py --cves-file my_cves.txt \
   --output-json report.json \
   --output-csv  report.csv
 
 # No console table (useful for scripting / piping)
-python3 vuln-prioritize.py CVE-2024-1234 --no-table
+python3 fluescan.py CVE-2024-1234 --no-table
 
 # Interactive guided menu (no arguments)
-python3 vuln-prioritize.py
+python3 fluescan.py
 
 # Diagnostics
-python3 vuln-prioritize.py --check-apis   # test all API connections
-python3 vuln-prioritize.py --setup        # configure API keys interactively
+python3 fluescan.py --check-apis   # test all API connections
+python3 fluescan.py --setup        # configure API keys interactively
 ```
 
 Positional CVE input accepts both space-separated and comma-separated formats.
@@ -258,7 +258,7 @@ repository for modules referencing the CVE — the most accurate source for MSF 
 ### Interactive setup
 
 ```bash
-python3 vuln-prioritize.py --setup
+python3 fluescan.py --setup
 ```
 
 Keys are saved to `.env` (already in `.gitignore`).
@@ -268,8 +268,8 @@ Keys are saved to `.env` (already in `.gitignore`).
 ## Project Structure
 
 ```
-vuln-prioritize/
-├── vuln-prioritize.py          # Entry point & orchestration
+fluescan/
+├── fluescan.py          # Entry point & orchestration
 ├── src/
 │   ├── config.py               # API key management
 │   ├── console.py              # Terminal UI, colours, progress
@@ -296,8 +296,8 @@ vuln-prioritize/
 
 | File | Format | Contents |
 |------|--------|----------|
-| `vulnerability_report.json` | JSON | All fields per CVE (CVSS, EPSS, KEV, PoC, exploit, scores) |
-| `vulnerability_report.csv` | CSV | Same data, spreadsheet-compatible |
+| `fluescan_report.json` | JSON | All fields per CVE (CVSS, EPSS, KEV, PoC, exploit, scores) |
+| `fluescan_report.csv` | CSV | Same data, spreadsheet-compatible |
 
 Custom paths: `--output-json path.json --output-csv path.csv`
 
@@ -326,7 +326,7 @@ This is an alpha release — contributions are very welcome.
 3. Commit your changes
 4. Open a Pull Request
 
-Please report bugs and ideas via [GitHub Issues](https://github.com/stov3/vuln-prioritize/issues).
+Please report bugs and ideas via [GitHub Issues](https://github.com/stov3/fluescan/issues).
 
 ---
 

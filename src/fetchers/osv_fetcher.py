@@ -46,7 +46,7 @@ def _query_single_cve(cve_id: str, limiter) -> Dict[str, Any]:
     request = Request(
         f"{OSV_VULN_URL}/{cve_upper}",
         headers={
-            "User-Agent": "vuln-prioritize/1.0",
+            "User-Agent": "fluescan/1.0",
             "Accept": "application/json",
         },
         method="GET",

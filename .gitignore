@@ -37,8 +37,8 @@ env/
 .nvd_cache.json
 
 # ── Generated reports (output, not source) ─────────────────────────────────────
-vulnerability_report.json
-vulnerability_report.csv
+fluescan_report.json
+fluescan_report.csv
 
 # ── Development / test artifacts ───────────────────────────────────────────────
 test_*.txt

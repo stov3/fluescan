@@ -70,7 +70,7 @@ def _save_poc_cache(cache: dict) -> None:
 def _github_headers(token: str = None) -> dict:
     """Build standard GitHub API headers per best-practice docs."""
     headers = {
-        "User-Agent":          "vuln-prioritize/1.0",
+        "User-Agent":          "fluescan/1.0",
         "Accept":              GITHUB_ACCEPT,
         "X-GitHub-Api-Version": GITHUB_API_VERSION,
     }
