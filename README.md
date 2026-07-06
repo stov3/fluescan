@@ -109,7 +109,7 @@ priority_score = min(priority_score, 100)
 - **exposure_weight** (from CVSS `AV:` attacker-reachability signal):
   - `1.10` = `AV:N` (network reachable — remotely exploitable at scale)
   - `1.00` = `AV:A` (adjacent network — requires LAN position, neutral)
-  - `0.85` = `AV:L` (local — requires existing foothold or user-assisted execution)
+  - `0.80` = `AV:L` (local — requires existing foothold or user-assisted execution)
   - `0.70` = `AV:P` (physical — requires on-site access)
   - `1.00` = unknown/unavailable
 - **cwe_weight** (from NVD CWE classification):
