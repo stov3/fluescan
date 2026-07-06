@@ -79,7 +79,7 @@ python3 fluescan.py --setup        # configure API keys interactively
 ---
 ## Scoring Algorithm
 
-The priority score uses a **weighted risk blend with exploitation override** to keep scoring transparent and practical.
+The priority score uses a **weighted risk blend with bounded context multipliers** to keep scoring practical, explainable, and close to real-world triage behavior.
 ### Scoring Formula
 
 ```
@@ -93,6 +93,8 @@ priority_score = raw_score × 100 × evidence_factor × exposure_weight
 
 if cisa_kev_confirmed:
     priority_score = priority_score × 1.15   # proportional urgency boost, capped at 100
+
+priority_score = min(priority_score, 100)
 ```
 
 ### Normalization Rules
@@ -135,6 +137,20 @@ In practice:
 - CISA-confirmed exploitation applies a ×1.15 urgency boost — proportional, so reachability and severity still differentiate KEV entries instead of pinning them to a fixed score
 - CWE and CISA alert-context weights are intentionally bounded, so they refine priority without overwhelming core CVSS/EPSS/KEV/exploit signals
 
+### Why These Variables (Human Triage Logic)
+
+This mirrors how a vulnerability management team actually thinks under remediation pressure:
+- **Base technical risk (CVSS)**: "How bad is impact if exploited?"
+- **Observed exploit likelihood (EPSS)**: "How likely is this to be exploited soon in the wild?"
+- **Known active exploitation (CISA KEV / VulnCheck early KEV)**: "Is this already being exploited by real attackers?"
+- **Exploit availability (PoC / Metasploit)**: "How much attacker effort is needed right now?"
+- **Reachability (AV)**: "Can this be hit remotely, or does it require foothold/physical presence?"
+- **Weakness class (CWE)**: "Does the flaw pattern historically lead to high-impact compromise paths?"
+- **Alert recency (CISA dateAdded)**: "Is this currently hot in defender/adversary workflows?"
+- **Evidence quality (confidence -> evidence_factor)**: "How much should we trust this rank given source coverage and agreement?"
+
+In short: severity alone is not enough, exploitability alone is not enough, and threat context alone is not enough. The score combines all three, then scales by evidence quality.
+
 ### Worked Example
 
 ```
@@ -169,6 +185,7 @@ KEV urgency boost (CISA-confirmed only):
 ### Design Rationale
 
 - Linear blending is easy to audit and explain to operators.
+- Bounded multipliers (AV/CWE/CISA-alert) add operational context without destabilizing baseline risk.
 - EPSS includes optional 7-day delta enrichment for trend-aware triage.
 - Missing data is handled transparently by the evidence factor instead of synthetic priors.
 
