@@ -196,13 +196,8 @@ confidence = (28 × cvss_quality) + (24 × epss_quality)
 Results are **sorted by priority** (highest first) and colour-coded.
 Console output now shows the prioritized table and completion line only.
 
-```
-Rank   CVE ID             Priority    CVSS   Severity   EPSS   AV   ExpW    KEV    PoC   Multiplier
-══════════════════════════════════════════════════════════════════════════════════════════════════════
-1      CVE-2023-44487     99.96       7.5    HIGH       1.00   N    1.10x   YES    YES   1.38x
-2      CVE-2022-0847      87.51       7.8    HIGH       0.88   L    0.85x   YES    YES   1.69x
-3      CVE-2022-21907     84.17       9.8    CRITICAL   0.93   N    1.10x   NO     YES   1.15x
-```
+<img width="1540" height="1076" alt="image" src="https://github.com/user-attachments/assets/9cf83a93-df51-4a3b-84dc-1e0bcb8de63c" />
+
 
 - `KEV` values are explicit: `YES` (CISA confirmed), `EARLY` (VulnCheck-only), `NO` (no KEV signal).
 - `AV` and `ExpW` show CVSS attack vector and the soft exposure weight used in scoring.
