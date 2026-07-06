@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.4-alpha] — 2026-07-06
+
+### Added
+- **Evidence-aware score modulation** in the main priority score.
+  - Source-quality blend: CVSS 28, EPSS 24, KEV 20, exploit intel 28.
+  - Agreement adjustment: +4 when ≥3 independent sources corroborate exploitation; −5 on strong conflict.
+  - Internal evidence confidence now drives `evidence_factor = min(1, evidence_score/85)` before exposure weighting and KEV floor logic.
+- **Concise deterministic `--explain` mode** with one paragraph per CVE explaining score drivers (KEV/EPSS/exploit artifacts/CVSS), attack-vector exposure impact, CISA floor application, and evidence dampening when applicable.
+- **Affected component orientation** in explain output.
+  - `--explain` now includes an `affected:` line per CVE to orient testers toward the vulnerable product/service/component.
+  - Component extraction prefers NVD CPE product/vendor labels, with fallback to NVD description and OSV summary when needed.
+- **Parallel batched ingestion** of independent data sources (NVD CVSS, EPSS, CISA KEV, VulnCheck KEV, GitHub PoC, Metasploit) to reduce end-to-end latency.
+
+### Changed
+- **Single-score design preserved**: priority score remains the only headline score.
+- Explanation payload simplified: `explain_summary` now contains the full operator-facing explanation paragraph (JSON/CSV).
+- Report payload now includes `affected_component` in JSON/CSV for downstream triage and assignment workflows.
+- Fetch pipeline now runs independent source pulls concurrently; OSV fallback still runs after CVSS fetch for missing scores.
+
+### Removed
+- Redundant multi-line explain dump (`components`/`multipliers`/reason list style output) in favor of concise narrative output.
+
 ## [0.1.3-alpha] — 2026-07-03
 
 ### Added

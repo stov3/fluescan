@@ -53,7 +53,6 @@ python3 fluescan.py CVE-2024-1234 CVE-2023-44487 CVE-2022-0847
 
 # Multiple CVEs (comma-separated also supported)
 python3 fluescan.py CVE-2024-1234, CVE-2023-44487, CVE-2022-0847
-
 # From a file (one CVE per line, # = comment)
 python3 fluescan.py --cves-file examples/sample_cves.txt
 
@@ -65,6 +64,9 @@ python3 fluescan.py --cves-file my_cves.txt \
 # No console table (useful for scripting / piping)
 python3 fluescan.py CVE-2024-1234 --no-table
 
+# Concise per-CVE score explanations
+python3 fluescan.py --cves-file examples/sample_cves.txt --explain
+
 # Interactive guided menu (no arguments)
 python3 fluescan.py
 
@@ -72,15 +74,12 @@ python3 fluescan.py
 python3 fluescan.py --check-apis   # test all API connections
 python3 fluescan.py --setup        # configure API keys interactively
 ```
-
-Positional CVE input accepts both space-separated and comma-separated formats.
+`--explain` prints a concise deterministic explanation per CVE with an `affected:` component line plus a one-paragraph score rationale (no AI dependency).
 
 ---
-
 ## Scoring Algorithm
 
 The priority score uses a **weighted risk blend with exploitation override** to keep scoring transparent and practical.
-
 ### Scoring Formula
 
 ```
@@ -89,16 +88,13 @@ raw_score = (0.30 × cvss_norm)
           + (0.20 × kev_strength)
           + (0.10 × exploit_norm)
 
-priority_score = raw_score × 100 × completeness_factor × exposure_weight
+priority_score = raw_score × 100 × evidence_factor × exposure_weight
 
 if cisa_kev_confirmed:
     priority_score = max(priority_score, 85)
 ```
 
 ### Normalization Rules
-
-- **cvss_norm** = `CVSS / 10` (clamped to [0,1])
-- **epss_norm** = `EPSS` (already [0,1], or unavailable)
 - **kev_strength**:
   - `1.0` = in CISA KEV (confirmed exploitation)
   - `0.4` = VulnCheck-only KEV early signal (reduced confidence weight)
@@ -114,18 +110,19 @@ if cisa_kev_confirmed:
   - `0.90` = `AV:P` (physical)
   - `1.00` = unknown/unavailable
 
-### Completeness Factor
+### Evidence Factor
 
-To avoid overconfidence when data is missing:
+Less (or weaker) evidence lowers the score. Each CVE's evidence confidence (see below) is converted into a smooth multiplier:
 
 ```
-completeness_factor = data_sources_found / 4
+evidence_factor = min(1.0, confidence / 85)
 ```
 
 In practice:
-- CVSS missing reduces confidence
-- EPSS missing reduces confidence
-- KEV and exploit channels are always evaluated as explicit yes/no signals
+- Full trust (factor 1.0) at confidence ≥ 85 — well-documented CVEs are not penalized
+- Below that, the penalty grows proportionally (e.g. confidence 57 → ×0.67)
+- CVSS from OSV fallback, missing EPSS, or failed API lookups all reduce the factor
+- The CISA KEV critical floor (85) still applies regardless — confirmed exploitation is a hard fact
 
 ### Worked Example
 
@@ -145,15 +142,8 @@ Normalize:
   epss_norm = 1.00
   kev_strength = 1.0
   exploit_norm = 1.0
-  exposure_weight = 1.07   # AV:N
-
-Weighted blend:
-  raw_score = (0.30×0.75) + (0.40×1.00) + (0.20×1.0) + (0.10×1.0)
-            = 0.225 + 0.400 + 0.200 + 0.100
-            = 0.925
-
-Completeness:
-  completeness_factor = 4/4 = 1.0
+Evidence:
+  evidence_factor = 1.0   # confidence ≥ 85, full trust
   score = 0.925 × 100 × 1.0 × 1.07 = 98.975
 
 Critical override (CISA-confirmed only):
@@ -163,22 +153,30 @@ Critical override (CISA-confirmed only):
 ### Risk Level Interpretation
 
 | Score Range | Risk Level | Interpretation |
-|-------------|-----------|-----------------|
-| 85–100 | **Critical** | Active exploitation, PoC/exploit exists, high severity |
-| 70–84 | **High** | Probable exploitation or high severity + strong evidence |
-| 50–69 | **Medium** | Exploitable but limited proof, or lower severity + evidence |
-| 30–49 | **Low** | Difficult to exploit or low severity, no active proof |
 | 0–29 | **Minimal** | Very low risk; low severity and no evidence of exploitation |
 
 ### Design Rationale
 
 - Linear blending is easy to audit and explain to operators.
-- EPSS gets the largest weight as the strongest forward-looking exploitation signal.
-- CISA KEV remains the hard-confirmation signal and enforces a critical floor.
-- VulnCheck KEV adds earlier exploitation evidence with a reduced confidence weight.
-- CVSS `AV:` adds a small exposure nudge to distinguish likely internet-facing vs internal-only paths.
 - EPSS includes optional 7-day delta enrichment for trend-aware triage.
-- Missing data is handled transparently by the completeness factor instead of synthetic priors.
+- Missing data is handled transparently by the evidence factor instead of synthetic priors.
+
+### Confidence & Evidence Scoring
+
+Fluescan outputs a **single priority score** — exploitability signals (KEV, EPSS, PoC, Metasploit) are already blended into it. Each CVE's **evidence confidence (0–100%)** is computed from source authority and health, then folded into the score via the `evidence_factor`: less or weaker evidence means a lower score.
+
+```
+confidence = (28 × cvss_quality) + (24 × epss_quality)
+           + (20 × kev_quality)  + (28 × exploit_intel_quality)
+           ± agreement adjustment
+```
+
+- **Source quality** distinguishes authority: NVD CVSS (0.92) > OSV fallback (0.75) > missing (0.30); a verified "not in EPSS" (0.45) is better evidence than a failed lookup (0.25).
+- **Errors ≠ absence**: a failed API check lowers confidence more than a verified negative result.
+- **Agreement adjustment**: +4 when ≥3 independent sources corroborate exploitation; −5 when signals conflict (critical CVSS but very weak exploitation evidence).
+- Levels: `HIGH` ≥ 85, `MEDIUM` 65–84, `LOW` < 65 (verify manually).
+- Each CVE's `--explain` output includes an `affected:` component label (product/service orientation) and a concise paragraph covering score drivers (KEV, EPSS, exploit artifacts, CVSS), attack-vector exposure, floor application, and any evidence dampening.
+- `affected_component` and `explain_summary` are exported in JSON/CSV for triage and ownership workflows.
 
 ---
 
@@ -209,6 +207,8 @@ Rank   CVE ID             Priority    CVSS   Severity   EPSS   AV   ExpW    KEV 
 ---
 
 ## Rate Limits
+
+All data sources are fetched in **parallel batches** (EPSS and KEV feeds are single batched downloads; per-CVE lookups run concurrently per source), so total fetch time is bounded by the slowest source instead of the sum of all of them.
 
 The tool enforces per-API rate limits automatically. When a limit is reached it displays an in-place countdown and resumes without data loss. Local result caches (24h TTL) mean re-runs of recently analyzed CVEs cost **zero** API calls.
 
@@ -298,8 +298,8 @@ fluescan/
 
 | File | Format | Contents |
 |------|--------|----------|
-| `fluescan_report.json` | JSON | All fields per CVE (CVSS, EPSS, KEV, PoC, exploit, scores) |
-| `fluescan_report.csv` | CSV | Same data, spreadsheet-compatible |
+| `fluescan_report.json` | JSON | All report fields per CVE, including `affected_component` and `explain_summary` |
+| `fluescan_report.csv` | CSV | Spreadsheet-friendly export with `affected_component` and `explain_summary` |
 
 Custom paths: `--output-json path.json --output-csv path.csv`
 
@@ -310,7 +310,7 @@ Custom paths: `--output-json path.json --output-csv path.csv`
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
 | `CVE not found` | Too new or not yet in NVD | Wait and retry; check nvd.nist.gov |
-| EPSS always `N/A` | Very new or very old CVE | Expected; score still computed with completeness penalty |
+| EPSS always `N/A` | Very new or very old CVE | Expected; score still computed with evidence-based dampening |
 | CVSS is missing from NVD | NVD lag for new CVE | OSV fallback is attempted automatically |
 | VulnCheck KEV unavailable | Missing/invalid token | Set `VULNCHECK_API_TOKEN` in `.env` |
 | GitHub returns 403 | Unauthenticated rate limit | Add `GITHUB_TOKEN` to `.env` |
